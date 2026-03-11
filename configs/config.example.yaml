@@ -57,5 +57,5 @@ heartbeat:
 update:
   enabled: true                                    # Enable automatic updates
   check_interval_hours: 6                          # How often to check for new versions
-  github_repo: "grd-platform/grd-siem-agent"      # GitHub repository for releases
+  github_repo: "KAPA-8/grd-siem-agent"      # GitHub repository for releases
   allow_prerelease: false                          # Whether to install pre-release versions

@@ -1,6 +1,6 @@
 [Unit]
 Description=GRD SIEM Agent - On-premises SIEM collector
-Documentation=https://github.com/grd-platform/grd-siem-agent
+Documentation=https://github.com/KAPA-8/grd-siem-agent
 After=network-online.target
 Wants=network-online.target
 

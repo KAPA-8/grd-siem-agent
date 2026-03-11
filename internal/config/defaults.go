@@ -33,6 +33,6 @@ func setDefaults(v *viper.Viper) {
 	// Self-update from GitHub Releases
 	v.SetDefault("update.enabled", true)
 	v.SetDefault("update.check_interval_hours", 6)
-	v.SetDefault("update.github_repo", "grd-platform/grd-siem-agent")
+	v.SetDefault("update.github_repo", "KAPA-8/grd-siem-agent")
 	v.SetDefault("update.allow_prerelease", false)
 }
