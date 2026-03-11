@@ -1,0 +1,37 @@
+[Unit]
+Description=GRD SIEM Agent - On-premises SIEM collector
+Documentation=https://github.com/grd-platform/grd-siem-agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=grd-agent
+Group=grd-agent
+ExecStartPre=/opt/grd-siem-agent/apply-update.sh
+ExecStart=/opt/grd-siem-agent/grd-siem-agent run --config /etc/grd-siem-agent/config.yaml
+Restart=on-failure
+RestartSec=10
+LimitNOFILE=65536
+
+# Logging (stdout/stderr go to journald)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=grd-siem-agent
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/grd-siem-agent /var/log/grd-siem-agent
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Resource limits
+MemoryMax=200M
+MemoryHigh=100M
+
+[Install]
+WantedBy=multi-user.target

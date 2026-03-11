@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./bin/grd-siem-agent --help)",
+      "Bash(./bin/grd-siem-agent validate --config configs/config.example.yaml)",
+      "Bash(make build-all)",
+      "Bash(make test)",
+      "Bash(chmod +x /Users/matiasfonseca/Desktop/agente_grd_cyberrisk/scripts/install.sh /Users/matiasfonseca/Desktop/agente_grd_cyberrisk/scripts/uninstall.sh)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.ibm.com)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_pmyRrs/**)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_jnHfld/**)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_N3xNAK/**)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_BmnWL1/**)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_qmP8Mq/**)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_T3SNaz/**)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_cEVrK8/**)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_jddaAT/**)",
+      "Bash(go get github.com/kardianos/service)",
+      "Bash(go build -o /dev/null ./cmd/grd-siem-agent/)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_LUVjIW/**)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_Hvfp9z/**)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_b6QI1X/**)",
+      "Read(//var/folders/wm/2rdls8l159xfmrffqkwh0n200000gn/T/TemporaryItems/NSIRD_screencaptureui_3X5ROl/**)",
+      "Bash(nslookup studio.gruporadical.com)",
+      "Bash(dig studio.gruporadical.com +short)",
+      "Bash(dig studio.gruporadical.com CNAME +short)"
+    ]
+  }
+}
