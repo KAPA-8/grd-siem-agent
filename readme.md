@@ -14,6 +14,8 @@ On-premises agent that collects security alerts from your SIEM (QRadar, Splunk, 
 
 ## Quick Start (Linux)
 
+> **All installation and management commands require root privileges (`sudo`).** Make sure you are logged in as root or have sudo access before proceeding.
+
 ### 1. Download
 
 Get the latest binary from [Releases](https://github.com/KAPA-8/grd-siem-agent/releases):
@@ -88,6 +90,8 @@ sudo systemctl status grd-siem-agent
 ```
 
 ## Windows Installation
+
+> **All commands must be run in an Administrator PowerShell session.** Right-click PowerShell and select "Run as Administrator".
 
 ```powershell
 # 1. Download binary from GitHub Releases
@@ -282,6 +286,8 @@ SIEM (QRadar) ──poll──> Collector ──normalize──> Sender ──HT
 
 ## Production Deployment
 
+> **Requires root/sudo access.** All commands below must be executed as root or with `sudo`.
+
 ### Complete step-by-step
 
 ```bash
@@ -436,6 +442,8 @@ make checksums
 - Checkpoint and buffer stored in `/var/lib/grd-siem-agent/` (writable only by grd-agent)
 
 ## Troubleshooting
+
+> **All troubleshooting commands require root/sudo (Linux) or Administrator (Windows).**
 
 ### Check agent status
 
