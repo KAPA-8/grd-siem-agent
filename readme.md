@@ -54,9 +54,7 @@ This creates:
 sudo nano /etc/grd-siem-agent/config.yaml
 ```
 
-#### Option A: Register from the GRD Dashboard (recommended)
-
-Register the agent from the GRD platform web interface. The dashboard will provide you with an `agent_id` and `agent_token`. Then set them in the config:
+Register the agent from the GRD platform web interface. The dashboard will provide you with an `agent_id` and `agent_token`. Set them in the config along with your SIEM connection details:
 
 ```yaml
 agent:
@@ -74,19 +72,6 @@ siem:
     api_key: "your-qradar-sec-token"
     validate_ssl: false
 ```
-
-#### Option B: Register via CLI
-
-If you prefer to register from the command line, set `platform.url` and `platform.org_api_key` in the config, then run:
-
-```bash
-sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent register \
-  --config /etc/grd-siem-agent/config.yaml
-```
-
-Copy the returned `agent_id` and `agent_token` into your `config.yaml`.
-
-> **Important:** The token is shown only once. Save it immediately.
 
 ### 4. Validate
 
@@ -154,8 +139,7 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/
 | `agent.name` | | `"GRD SIEM Agent"` | Human-readable name for this agent |
 | `agent.hostname` | | auto-detected | Override hostname |
 | `platform.url` | | **required** | GRD platform URL |
-| `platform.agent_token` | | **required** | Token from registration |
-| `platform.org_api_key` | | `""` | Organization API key (only for CLI registration) |
+| `platform.agent_token` | | **required** | Token from GRD Dashboard registration |
 | `siem.type` | | `"qradar"` | SIEM type: `qradar`, `splunk`, `sentinel` |
 | `siem.connection_id` | | **required** | Connection UUID from platform dashboard |
 | `siem.api_url` | | **required** | SIEM console URL (internal network) |
@@ -193,7 +177,6 @@ export GRD_SYNC_INTERVAL_MINUTES=30
 
 ```bash
 grd-siem-agent run       # Start the agent (foreground or service mode)
-grd-siem-agent register  # Register with the GRD platform (one-time)
 grd-siem-agent validate  # Validate configuration file
 grd-siem-agent update    # Check for and stage updates
 grd-siem-agent version   # Print version information
@@ -203,13 +186,6 @@ grd-siem-agent version   # Print version information
 
 ```
 --config, -c    Path to config file (default: config.yaml)
-```
-
-#### `register` flags
-```
---name          Agent name (default: from config)
---hostname      Agent hostname (default: system hostname)
---siem-type     SIEM type: qradar, splunk, sentinel (default: from config)
 ```
 
 #### `update` flags
@@ -495,8 +471,7 @@ sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent validate \
 | `cp: no se puede crear el fichero` in apply-update | `ExecStartPre` runs as `grd-agent` but `/opt/` is owned by root | Update to v0.1.3+ (uses `ExecStartPre=+` to run as root). Manual fix: change `ExecStartPre=/opt/...` to `ExecStartPre=+/opt/...` in the service file |
 | `permission denied` on checkpoint | Checkpoint written to read-only `/etc/` | Update to v0.1.1+ (writes to `/var/lib/grd-siem-agent/`). Manual fix: `sudo chown grd-agent:grd-agent /etc/grd-siem-agent/` |
 | `no releases found` on update | Missing `update` section in config | Add `update:` section with `github_repo: "KAPA-8/grd-siem-agent"` to config.yaml |
-| `registration failed (401)` | Bad org API key | Check `platform.org_api_key` (only needed for CLI registration) |
-| `org_api_key is required` | Trying CLI register, but registered from dashboard | You don't need CLI registration — just set `agent.id` and `platform.agent_token` from the dashboard |
+| `registration failed` | Invalid credentials | Verify `agent.id` and `platform.agent_token` match what the GRD Dashboard provided |
 | `collector init: connection refused` | Can't reach SIEM | Verify `siem.api_url` is reachable: `curl -k https://SIEM_IP/api/help/versions` |
 | `sync failed (403)` | Invalid agent token | Verify `platform.agent_token` matches what dashboard/registration returned |
 | `certificate verify failed` | Self-signed SIEM cert | Set `siem.credentials.validate_ssl: false` |

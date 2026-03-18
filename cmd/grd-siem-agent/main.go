@@ -14,8 +14,6 @@ import (
 	"github.com/grd-platform/grd-siem-agent/internal/agent"
 	"github.com/grd-platform/grd-siem-agent/internal/config"
 	"github.com/grd-platform/grd-siem-agent/internal/logging"
-	"github.com/grd-platform/grd-siem-agent/internal/models"
-	"github.com/grd-platform/grd-siem-agent/internal/transport"
 	"github.com/grd-platform/grd-siem-agent/internal/updater"
 	"github.com/grd-platform/grd-siem-agent/internal/version"
 
@@ -35,7 +33,6 @@ func main() {
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "config.yaml", "path to config file")
 
 	rootCmd.AddCommand(runCmd())
-	rootCmd.AddCommand(registerCmd())
 	rootCmd.AddCommand(validateCmd())
 	rootCmd.AddCommand(versionCmd())
 	rootCmd.AddCommand(updateCmd())
@@ -154,82 +151,6 @@ func runInteractive() error {
 	defer stop()
 
 	return a.Run(ctx)
-}
-
-func registerCmd() *cobra.Command {
-	var (
-		name     string
-		hostname string
-		siemType string
-	)
-
-	cmd := &cobra.Command{
-		Use:   "register",
-		Short: "Register this agent with the GRD platform",
-		Long: `Registers a new agent with the platform using the organization API key.
-The returned agent_token must be saved in your config.yaml under platform.agent_token.
-This token is only shown once.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := config.LoadMinimal(configPath)
-			if err != nil {
-				return fmt.Errorf("loading config: %w", err)
-			}
-
-			if cfg.Platform.URL == "" {
-				return fmt.Errorf("platform.url is required in config")
-			}
-			if cfg.Platform.OrgAPIKey == "" {
-				return fmt.Errorf("platform.org_api_key is required for registration")
-			}
-
-			// Use defaults from config if flags not provided
-			if name == "" {
-				name = cfg.Agent.Name
-			}
-			if hostname == "" {
-				hostname = cfg.Agent.Hostname
-				if hostname == "" {
-					hostname, _ = os.Hostname()
-				}
-			}
-			if siemType == "" {
-				siemType = cfg.SIEM.Type
-			}
-
-			req := models.RegisterRequest{
-				Name:         name,
-				Hostname:     hostname,
-				AgentVersion: version.Version,
-				SIEMType:     siemType,
-			}
-
-			fmt.Printf("Registering agent with platform %s...\n", cfg.Platform.URL)
-
-			ctx := context.Background()
-			resp, err := transport.Register(ctx, cfg.Platform.URL, cfg.Platform.OrgAPIKey, req)
-			if err != nil {
-				return fmt.Errorf("registration failed: %w", err)
-			}
-
-			fmt.Printf("\nRegistration successful!\n\n")
-			fmt.Printf("  Agent ID:    %s\n", resp.AgentID)
-			fmt.Printf("  Agent Token: %s\n\n", resp.AgentToken)
-			fmt.Printf("IMPORTANT: Save this token in your config.yaml:\n\n")
-			fmt.Printf("  platform:\n")
-			fmt.Printf("    agent_token: \"%s\"\n\n", resp.AgentToken)
-			fmt.Printf("  agent:\n")
-			fmt.Printf("    id: \"%s\"\n\n", resp.AgentID)
-			fmt.Printf("The token will NOT be shown again.\n")
-
-			return nil
-		},
-	}
-
-	cmd.Flags().StringVar(&name, "name", "", "agent name (default: from config)")
-	cmd.Flags().StringVar(&hostname, "hostname", "", "agent hostname (default: system hostname)")
-	cmd.Flags().StringVar(&siemType, "siem-type", "", "SIEM type: qradar, splunk, sentinel (default: from config)")
-
-	return cmd
 }
 
 func validateCmd() *cobra.Command {

@@ -142,18 +142,17 @@ else
 # Edit this file with your actual values, then run:
 #   sudo systemctl start grd-siem-agent
 #
-# Register from the GRD Dashboard (recommended) or via CLI:
-#   CLI: grd-siem-agent register --config config.yaml
+# Register the agent from the GRD Dashboard first, then copy
+# the agent_id and agent_token into this file.
 
 agent:
-  id: ""                    # From GRD Dashboard or CLI registration
+  id: ""                    # From GRD Dashboard
   name: "GRD SIEM Agent"
   hostname: ""
 
 platform:
   url: ""                   # Your GRD platform URL (e.g., https://app.example.com)
-  agent_token: ""           # Token from dashboard or CLI registration
-  org_api_key: ""           # Org API key (only needed for CLI registration)
+  agent_token: ""           # Token from GRD Dashboard
 
 siem:
   type: "qradar"
@@ -261,16 +260,8 @@ echo ""
 echo "  1. Edit the config file:"
 echo "     sudo nano $CONFIG_DIR/config.yaml"
 echo ""
-echo "  2. Register the agent (choose one):"
-echo ""
-echo "     Option A - From GRD Dashboard (recommended):"
-echo "       Register in the web interface, then copy the agent_id"
-echo "       and agent_token into config.yaml"
-echo ""
-echo "     Option B - Via CLI:"
-echo "       Set platform.url and platform.org_api_key, then run:"
-echo "       sudo -u $AGENT_USER $INSTALL_DIR/grd-siem-agent register \\"
-echo "         --config $CONFIG_DIR/config.yaml"
+echo "  2. Register the agent from the GRD Dashboard:"
+echo "       Copy the agent_id and agent_token into config.yaml"
 echo ""
 echo "  3. Set the SIEM connection details (api_url, api_key, connection_id)"
 echo ""

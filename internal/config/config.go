@@ -29,8 +29,7 @@ type AgentConfig struct {
 
 type PlatformConfig struct {
 	URL        string `mapstructure:"url"`
-	AgentToken string `mapstructure:"agent_token"` // grd_agent_xxx token from registration
-	OrgAPIKey  string `mapstructure:"org_api_key"` // Only used for registration
+	AgentToken string `mapstructure:"agent_token"` // grd_agent_xxx token from GRD Dashboard
 }
 
 type SIEMConfig struct {

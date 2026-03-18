@@ -2,27 +2,21 @@
 # Copy this file to config.yaml and edit with your values.
 #
 # SETUP FLOW:
-# 1. Register the agent from the GRD Dashboard (recommended) or via CLI
-# 2. Set the agent_id and agent_token from registration
+# 1. Register the agent from the GRD Dashboard
+# 2. Copy the agent_id and agent_token into this file
 # 3. Set the platform URL and SIEM connection details
 # 4. Run: grd-siem-agent validate --config config.yaml
 # 5. Run: grd-siem-agent run --config config.yaml
-#
-# CLI REGISTRATION (alternative):
-# 1. Set platform.url and platform.org_api_key
-# 2. Run: grd-siem-agent register --config config.yaml
-# 3. Copy the returned agent_id and agent_token into this file
 
 agent:
-  id: ""                                # From GRD Dashboard or 'grd-siem-agent register'
+  id: ""                                # From GRD Dashboard
   name: "GRD SIEM Agent"                # Human-readable name
   hostname: ""                          # Auto-detected if empty
 
 # Cloud platform connection
 platform:
   url: "https://your-platform.example.com"   # GRD platform URL
-  agent_token: ""                            # Token from dashboard or registration (or GRD_PLATFORM_AGENT_TOKEN)
-  org_api_key: ""                            # Organization API key (only needed for CLI registration)
+  agent_token: ""                            # Token from GRD Dashboard (or GRD_PLATFORM_AGENT_TOKEN)
 
 # SIEM connection
 siem:

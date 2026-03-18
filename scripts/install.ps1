@@ -115,18 +115,17 @@ if (Test-Path $configFile) {
 # GRD SIEM Agent Configuration
 # Edit this file with your actual values, then start the service.
 #
-# Register from the GRD Dashboard (recommended) or via CLI:
-#   CLI: & "C:\Program Files\GRD SIEM Agent\grd-siem-agent.exe" register --config "$configFile"
+# Register the agent from the GRD Dashboard first, then copy
+# the agent_id and agent_token into this file.
 
 agent:
-  id: ""                    # From GRD Dashboard or CLI registration
+  id: ""                    # From GRD Dashboard
   name: "GRD SIEM Agent"
   hostname: ""
 
 platform:
   url: ""                   # Your GRD platform URL
-  agent_token: ""           # Token from dashboard or CLI registration
-  org_api_key: ""           # Org API key (only needed for CLI registration)
+  agent_token: ""           # Token from GRD Dashboard
 
 siem:
   type: "qradar"
@@ -207,15 +206,8 @@ Write-Host ""
 Write-Host "  1. Edit the config file:"
 Write-Host "     notepad `"$ConfigDir\config.yaml`"" -ForegroundColor White
 Write-Host ""
-Write-Host "  2. Register the agent (choose one):" -ForegroundColor Yellow
-Write-Host ""
-Write-Host "     Option A - From GRD Dashboard (recommended):"
-Write-Host "       Register in the web interface, then copy the agent_id"
-Write-Host "       and agent_token into config.yaml"
-Write-Host ""
-Write-Host "     Option B - Via CLI:"
-Write-Host "       Set platform.url and platform.org_api_key, then run:"
-Write-Host "       & `"$InstallDir\grd-siem-agent.exe`" register --config `"$ConfigDir\config.yaml`"" -ForegroundColor White
+Write-Host "  2. Register the agent from the GRD Dashboard:"
+Write-Host "       Copy the agent_id and agent_token into config.yaml"
 Write-Host ""
 Write-Host "  3. Set SIEM connection details (api_url, api_key, connection_id)"
 Write-Host ""
