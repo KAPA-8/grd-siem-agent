@@ -12,7 +12,7 @@ On-premises agent that collects security alerts from your SIEM (QRadar, Splunk, 
 - **Lightweight** - Single static binary, ~12 MB, no runtime dependencies
 - **Secure** - Runs as unprivileged user, systemd hardening, SHA256 checksum verification
 
-## Quick Start
+## Quick Start (Linux)
 
 ### 1. Download
 
@@ -23,29 +23,30 @@ Get the latest binary from [Releases](https://github.com/KAPA-8/grd-siem-agent/r
 curl -Lo grd-siem-agent https://github.com/KAPA-8/grd-siem-agent/releases/latest/download/grd-siem-agent-linux-amd64
 chmod +x grd-siem-agent
 
-# macOS (Apple Silicon)
-curl -Lo grd-siem-agent https://github.com/KAPA-8/grd-siem-agent/releases/latest/download/grd-siem-agent-darwin-arm64
+# Linux (arm64)
+curl -Lo grd-siem-agent https://github.com/KAPA-8/grd-siem-agent/releases/latest/download/grd-siem-agent-linux-arm64
 chmod +x grd-siem-agent
 ```
 
-### 2. Install (Linux)
+> **Note:** The binary is a standalone executable with no file extension — this is normal for Linux/macOS. Do not attempt to unzip it. You can verify it with `file ./grd-siem-agent` (should show `ELF 64-bit`).
 
-Download the install script and run it:
+### 2. Install
+
+Download the install script and run it. You do **not** need to clone the repository:
 
 ```bash
 curl -Lo install.sh https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/install.sh
 sudo bash install.sh --binary ./grd-siem-agent
 ```
 
-> **Note:** The binary is a standalone executable with no file extension — this is normal for Linux/macOS. Do not attempt to unzip it.
-
 This creates:
-| Path | Purpose |
-|------|---------|
-| `/opt/grd-siem-agent/` | Binary |
-| `/etc/grd-siem-agent/config.yaml` | Configuration |
-| `/var/lib/grd-siem-agent/` | Data (buffer, checkpoint) |
-| `/var/log/grd-siem-agent/` | Logs |
+
+| Path | Owner | Purpose |
+|------|-------|---------|
+| `/opt/grd-siem-agent/` | `root` | Binary + update script |
+| `/etc/grd-siem-agent/config.yaml` | `root:grd-agent` (640) | Configuration (contains secrets) |
+| `/var/lib/grd-siem-agent/` | `grd-agent` (750) | Data: buffer, checkpoint, update staging |
+| `/var/log/grd-siem-agent/` | `grd-agent` (750) | Log files |
 
 ### 3. Configure
 
@@ -71,6 +72,7 @@ siem:
   api_url: "https://192.168.1.50"
   credentials:
     api_key: "your-qradar-sec-token"
+    validate_ssl: false
 ```
 
 #### Option B: Register via CLI
@@ -86,7 +88,14 @@ Copy the returned `agent_id` and `agent_token` into your `config.yaml`.
 
 > **Important:** The token is shown only once. Save it immediately.
 
-### 4. Start
+### 4. Validate
+
+```bash
+sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent validate \
+  --config /etc/grd-siem-agent/config.yaml
+```
+
+### 5. Start
 
 ```bash
 sudo systemctl start grd-siem-agent
@@ -106,10 +115,11 @@ The agent installs as a Windows Service (`GRDSIEMAgent`) using NSSM. Configurati
 
 | Section | Key | Default | Description |
 |---------|-----|---------|-------------|
-| `agent.name` | | `""` | Human-readable name for this agent |
+| `agent.name` | | `"GRD SIEM Agent"` | Human-readable name for this agent |
 | `agent.hostname` | | auto-detected | Override hostname |
 | `platform.url` | | **required** | GRD platform URL |
 | `platform.agent_token` | | **required** | Token from registration |
+| `platform.org_api_key` | | `""` | Organization API key (only for CLI registration) |
 | `siem.type` | | `"qradar"` | SIEM type: `qradar`, `splunk`, `sentinel` |
 | `siem.connection_id` | | **required** | Connection UUID from platform dashboard |
 | `siem.api_url` | | **required** | SIEM console URL (internal network) |
@@ -121,10 +131,11 @@ The agent installs as a Windows Service (`GRDSIEMAgent`) using NSSM. Configurati
 | `sync.max_alerts_per_sync` | | `1000` | Max alerts per cycle |
 | `sync.filters.min_severity` | | `"medium"` | Minimum severity filter |
 | `buffer.enabled` | | `true` | Enable offline SQLite buffer |
-| `buffer.path` | | `"./buffer.db"` | Buffer file path |
+| `buffer.path` | | `"/var/lib/grd-siem-agent/buffer.db"` | Buffer file path |
 | `buffer.max_size_mb` | | `500` | Max buffer size |
 | `logging.level` | | `"info"` | Log level: `debug`, `info`, `warn`, `error` |
 | `logging.path` | | `""` | Log file path (empty = stderr) |
+| `logging.max_size_mb` | | `100` | Max log file size |
 | `heartbeat.interval_seconds` | | `60` | Heartbeat frequency |
 | `update.enabled` | | `true` | Enable auto-updates |
 | `update.check_interval_hours` | | `6` | Update check frequency |
@@ -179,17 +190,22 @@ The agent automatically checks GitHub Releases for new versions every 6 hours (c
 4. Exits to trigger a service restart
 5. On restart, `apply-update.sh` verifies and replaces the binary
 
-To check manually:
+To trigger an update manually:
 
 ```bash
 # Check if an update is available
-grd-siem-agent update --check --config /etc/grd-siem-agent/config.yaml
+sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent update --check \
+  --config /etc/grd-siem-agent/config.yaml
 
 # Download and stage update
-grd-siem-agent update --config /etc/grd-siem-agent/config.yaml
+sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent update \
+  --config /etc/grd-siem-agent/config.yaml
 
 # Apply by restarting the service
 sudo systemctl restart grd-siem-agent
+
+# Verify new version
+/opt/grd-siem-agent/grd-siem-agent version
 ```
 
 To disable auto-updates:
@@ -231,6 +247,95 @@ SIEM (QRadar) ──poll──> Collector ──normalize──> Sender ──HT
                                      Drain ──retry──> GRD Platform
 ```
 
+### Directory Layout (Linux production)
+
+```
+/opt/grd-siem-agent/
+├── grd-siem-agent              # Main binary (root:root, 755)
+└── apply-update.sh             # Update applier (root:root, 755)
+
+/etc/grd-siem-agent/
+└── config.yaml                 # Configuration (root:grd-agent, 640)
+
+/var/lib/grd-siem-agent/        # Data directory (grd-agent:grd-agent, 750)
+├── buffer.db                   # SQLite offline buffer
+├── .grd-agent-checkpoint       # Last sync checkpoint
+└── .update/                    # Update staging area
+    └── pending.json            # Pending update metadata
+
+/var/log/grd-siem-agent/        # Logs (grd-agent:grd-agent, 750)
+└── agent.log
+```
+
+## Production Deployment
+
+### Complete step-by-step
+
+```bash
+# 1. Download binary
+curl -Lo grd-siem-agent https://github.com/KAPA-8/grd-siem-agent/releases/latest/download/grd-siem-agent-linux-amd64
+chmod +x grd-siem-agent
+
+# 2. Download and run installer
+curl -Lo install.sh https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/install.sh
+sudo bash install.sh --binary ./grd-siem-agent
+
+# 3. Configure (use values from GRD Dashboard)
+sudo nano /etc/grd-siem-agent/config.yaml
+
+# 4. Validate configuration
+sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent validate \
+  --config /etc/grd-siem-agent/config.yaml
+
+# 5. Start and verify
+sudo systemctl start grd-siem-agent
+sudo systemctl status grd-siem-agent
+sudo journalctl -u grd-siem-agent -f
+```
+
+### File permissions summary
+
+| Path | Owner | Mode | Notes |
+|------|-------|------|-------|
+| `/opt/grd-siem-agent/grd-siem-agent` | `root:root` | `755` | Binary, read-only for agent |
+| `/opt/grd-siem-agent/apply-update.sh` | `root:root` | `755` | Runs as ExecStartPre (root) |
+| `/etc/grd-siem-agent/config.yaml` | `root:grd-agent` | `640` | Contains secrets, readable by agent |
+| `/var/lib/grd-siem-agent/` | `grd-agent:grd-agent` | `750` | Writable by agent (buffer, checkpoint) |
+| `/var/log/grd-siem-agent/` | `grd-agent:grd-agent` | `750` | Writable by agent (logs) |
+
+### Systemd service details
+
+The service runs with the following security hardening:
+
+- **User/Group:** `grd-agent` (unprivileged, no login shell)
+- **NoNewPrivileges:** `true`
+- **ProtectSystem:** `strict` (filesystem is read-only except allowed paths)
+- **ProtectHome:** `true`
+- **PrivateTmp:** `true`
+- **MemoryMax:** `200M` / **MemoryHigh:** `100M`
+- **ReadWritePaths:** `/var/lib/grd-siem-agent`, `/var/log/grd-siem-agent`
+- **Restart:** `on-failure` with 10s delay
+
+### Verifying the installation
+
+```bash
+# Check service status
+sudo systemctl status grd-siem-agent
+
+# View real-time logs
+sudo journalctl -u grd-siem-agent -f
+
+# View agent log file
+sudo tail -f /var/log/grd-siem-agent/agent.log
+
+# Check current version
+/opt/grd-siem-agent/grd-siem-agent version
+
+# Verify binary architecture
+file /opt/grd-siem-agent/grd-siem-agent
+# Expected: ELF 64-bit LSB executable, x86-64 (for amd64)
+```
+
 ## Building from Source
 
 Requirements: Go 1.25+
@@ -259,12 +364,13 @@ make checksums
 
 ## Security
 
-- Runs as unprivileged system user `grd-agent`
+- Runs as unprivileged system user `grd-agent` (no login shell)
 - systemd hardening: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`
-- Config files secured with `640` permissions (readable only by owner/group)
+- Config file permissions `640` — contains API keys, readable only by root and grd-agent group
 - Memory limits enforced: 200 MB max
 - Update binaries verified with SHA256 checksums before installation
 - All platform communication over HTTPS with Bearer token authentication
+- Checkpoint and buffer stored in `/var/lib/grd-siem-agent/` (writable only by grd-agent)
 
 ## Troubleshooting
 
@@ -277,11 +383,14 @@ sudo systemctl status grd-siem-agent
 ### View logs
 
 ```bash
-# Real-time logs
+# Real-time logs (systemd journal)
 sudo journalctl -u grd-siem-agent -f
 
 # Last 100 lines
 sudo journalctl -u grd-siem-agent -n 100 --no-pager
+
+# Log file
+sudo tail -100 /var/log/grd-siem-agent/agent.log
 ```
 
 ### Validate configuration
@@ -293,20 +402,35 @@ sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent validate \
 
 ### Common issues
 
-| Issue | Solution |
-|-------|----------|
-| `registration failed (401)` | Check `platform.org_api_key` is correct |
-| `collector init: connection refused` | Verify `siem.api_url` is reachable from this server |
-| `sync failed (403)` | Check `platform.agent_token` is valid |
-| `certificate verify failed` | Set `siem.credentials.validate_ssl: false` or install the CA cert |
-| Agent not collecting alerts | Check `sync.filters.min_severity` — may be filtering too aggressively |
-| Buffer growing large | Platform may be unreachable — check network/firewall |
+| Issue | Cause | Solution |
+|-------|-------|----------|
+| `status=203/EXEC` in systemd | `apply-update.sh` missing or not executable | `sudo curl -Lo /opt/grd-siem-agent/apply-update.sh https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/apply-update.sh && sudo chmod 755 /opt/grd-siem-agent/apply-update.sh` |
+| `permission denied` on checkpoint | Checkpoint written to read-only `/etc/` | Update to v0.1.1+ (writes to `/var/lib/grd-siem-agent/`) |
+| `no releases found` on update | Missing `update.github_repo` in config | Add `update:` section with `github_repo: "KAPA-8/grd-siem-agent"` |
+| `registration failed (401)` | Bad org API key | Check `platform.org_api_key` (only needed for CLI registration) |
+| `collector init: connection refused` | Can't reach SIEM | Verify `siem.api_url` is reachable: `curl -k https://SIEM_IP/api/help/versions` |
+| `sync failed (403)` | Invalid agent token | Verify `platform.agent_token` matches what dashboard/registration returned |
+| `certificate verify failed` | Self-signed SIEM cert | Set `siem.credentials.validate_ssl: false` |
+| Agent not collecting alerts | Severity filter too strict | Lower `sync.filters.min_severity` (e.g., `"low"` or `"info"`) |
+| Buffer growing large | Platform unreachable | Check network/firewall to platform URL |
+| Binary won't execute | Wrong architecture | Run `file ./grd-siem-agent` — must show `ELF 64-bit` for Linux, not `Mach-O` (macOS) |
+
+### Force manual update
+
+```bash
+sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent update \
+  --config /etc/grd-siem-agent/config.yaml
+sudo systemctl restart grd-siem-agent
+/opt/grd-siem-agent/grd-siem-agent version
+```
 
 ### Uninstall
 
 ```bash
 # Linux
-sudo ./scripts/uninstall.sh
+curl -Lo uninstall.sh https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/uninstall.sh
+sudo bash uninstall.sh          # Keeps config and data
+sudo bash uninstall.sh --purge  # Removes everything
 
 # Windows (Administrator PowerShell)
 .\scripts\uninstall.ps1

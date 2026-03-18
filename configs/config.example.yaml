@@ -2,22 +2,27 @@
 # Copy this file to config.yaml and edit with your values.
 #
 # SETUP FLOW:
+# 1. Register the agent from the GRD Dashboard (recommended) or via CLI
+# 2. Set the agent_id and agent_token from registration
+# 3. Set the platform URL and SIEM connection details
+# 4. Run: grd-siem-agent validate --config config.yaml
+# 5. Run: grd-siem-agent run --config config.yaml
+#
+# CLI REGISTRATION (alternative):
 # 1. Set platform.url and platform.org_api_key
 # 2. Run: grd-siem-agent register --config config.yaml
 # 3. Copy the returned agent_id and agent_token into this file
-# 4. Set the SIEM connection details
-# 5. Run: grd-siem-agent run --config config.yaml
 
 agent:
-  id: ""                                # Filled after registration
-  name: "QRadar Production Collector"   # Human-readable name
+  id: ""                                # From GRD Dashboard or 'grd-siem-agent register'
+  name: "GRD SIEM Agent"                # Human-readable name
   hostname: ""                          # Auto-detected if empty
 
 # Cloud platform connection
 platform:
   url: "https://your-platform.example.com"   # GRD platform URL
-  agent_token: ""                            # Token from 'grd-siem-agent register' (or GRD_PLATFORM_AGENT_TOKEN)
-  org_api_key: ""                            # Organization API key (only needed for registration)
+  agent_token: ""                            # Token from dashboard or registration (or GRD_PLATFORM_AGENT_TOKEN)
+  org_api_key: ""                            # Organization API key (only needed for CLI registration)
 
 # SIEM connection
 siem:
@@ -40,13 +45,13 @@ sync:
 # Local buffer (for offline resilience)
 buffer:
   enabled: true
-  path: "./buffer.db"        # SQLite buffer file path
+  path: "/var/lib/grd-siem-agent/buffer.db"   # SQLite buffer file path (must be writable by grd-agent)
   max_size_mb: 500
 
 # Logging
 logging:
-  level: "info"              # debug, info, warn, error
-  path: ""                   # Log file path (empty = stderr only)
+  level: "info"                                    # debug, info, warn, error
+  path: "/var/log/grd-siem-agent/agent.log"        # Log file path (empty = stderr only)
   max_size_mb: 100
 
 # Heartbeat
@@ -57,5 +62,5 @@ heartbeat:
 update:
   enabled: true                                    # Enable automatic updates
   check_interval_hours: 6                          # How often to check for new versions
-  github_repo: "KAPA-8/grd-siem-agent"      # GitHub repository for releases
+  github_repo: "KAPA-8/grd-siem-agent"             # GitHub repository for releases
   allow_prerelease: false                          # Whether to install pre-release versions
