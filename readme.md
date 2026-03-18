@@ -240,8 +240,7 @@ grd-siem-agent
 │   └── QRadar: polls /api/siem/offenses, maps to MITRE ATT&CK
 ├── Sender (HTTPS to GRD platform)
 │   ├── /api/v1/siem-agent/sync       → send alerts
-│   ├── /api/v1/siem-agent/heartbeat  → health status
-│   └── /api/v1/siem-agent/register   → one-time registration
+│   └── /api/v1/siem-agent/heartbeat  → health status
 ├── Buffer (SQLite, offline resilience)
 │   └── Stores failed batches, drains on next cycle
 ├── Heartbeat (background, every 60s)
@@ -516,11 +515,13 @@ Invoke-WebRequest -Uri "https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/
 
 ## Tested and Verified
 
-The following features have been validated in a production environment (Ubuntu Server, QRadar SIEM):
+The following features have been validated in production environments:
+
+**Linux (Ubuntu Server + QRadar SIEM):**
 
 - [x] Binary download and installation without cloning the repo
 - [x] Systemd service with security hardening (ProtectSystem=strict, NoNewPrivileges, MemoryMax)
-- [x] Agent registration from GRD Dashboard (recommended flow)
+- [x] Agent registration from GRD Dashboard
 - [x] QRadar offense collection via REST API
 - [x] Alert sync to GRD platform (34 alerts imported successfully)
 - [x] Heartbeat monitoring (60s interval)
@@ -528,8 +529,21 @@ The following features have been validated in a production environment (Ubuntu S
 - [x] Auto-update from GitHub Releases (v0.1.0 → v0.1.2 verified)
 - [x] Checkpoint persistence in `/var/lib/grd-siem-agent/`
 - [x] `apply-update.sh` running as root via `ExecStartPre=+`
+
+**Windows Server + QRadar SIEM:**
+
+- [x] Binary download and installation via PowerShell
+- [x] Windows Service (GRDSIEMAgent) with automatic startup and restart-on-failure
+- [x] QRadar offense collection via REST API
+- [x] Alert sync to GRD platform
+- [x] Heartbeat monitoring
+- [x] SQLite buffer for offline resilience
+
+**General:**
+
 - [x] Cross-compilation for 5 platforms via GitHub Actions
 - [x] SHA256 checksum verification on updates
+- [x] Auto-update check every 10 minutes
 
 ## License
 
