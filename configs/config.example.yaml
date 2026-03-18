@@ -61,6 +61,7 @@ heartbeat:
 # Self-update (from GitHub Releases)
 update:
   enabled: true                                    # Enable automatic updates
-  check_interval_hours: 6                          # How often to check for new versions
+  check_interval_minutes: 10                       # How often to check for new versions (in minutes)
+  # check_interval_hours: 6                        # Alternative: check interval in hours (minutes takes priority)
   github_repo: "KAPA-8/grd-siem-agent"             # GitHub repository for releases
   allow_prerelease: false                          # Whether to install pre-release versions

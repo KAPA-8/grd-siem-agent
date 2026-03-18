@@ -105,11 +105,47 @@ sudo systemctl status grd-siem-agent
 ## Windows Installation
 
 ```powershell
-# Run as Administrator
-.\scripts\install.ps1 -BinaryPath .\grd-siem-agent-windows-amd64.exe
+# 1. Download binary from GitHub Releases
+Invoke-WebRequest -Uri "https://github.com/KAPA-8/grd-siem-agent/releases/latest/download/grd-siem-agent-windows-amd64.exe" -OutFile "grd-siem-agent.exe"
+
+# 2. Download install script
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/install.ps1" -OutFile "install.ps1"
+
+# 3. Run as Administrator
+.\install.ps1 -BinaryPath .\grd-siem-agent.exe
 ```
 
-The agent installs as a Windows Service (`GRDSIEMAgent`) using NSSM. Configuration and data are stored under `C:\ProgramData\GRD SIEM Agent\`.
+This creates:
+
+| Path | Purpose |
+|------|---------|
+| `C:\Program Files\GRD SIEM Agent\` | Binary + update script |
+| `C:\ProgramData\GRD SIEM Agent\config.yaml` | Configuration |
+| `C:\ProgramData\GRD SIEM Agent\data\` | Buffer, checkpoint |
+| `C:\ProgramData\GRD SIEM Agent\logs\` | Log files |
+
+The agent installs as a Windows Service (`GRDSIEMAgent`) with automatic startup and restart-on-failure recovery.
+
+```powershell
+# Configure
+notepad "C:\ProgramData\GRD SIEM Agent\config.yaml"
+
+# Start / Stop / Status
+Start-Service GRDSIEMAgent
+Stop-Service GRDSIEMAgent
+Get-Service GRDSIEMAgent
+
+# View logs
+Get-Content "C:\ProgramData\GRD SIEM Agent\logs\agent.log" -Tail 50 -Wait
+
+# Check version
+& "C:\Program Files\GRD SIEM Agent\grd-siem-agent.exe" version
+
+# Uninstall
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/uninstall.ps1" -OutFile "uninstall.ps1"
+.\uninstall.ps1          # Keeps config and data
+.\uninstall.ps1 -Purge   # Removes everything
+```
 
 ## Configuration Reference
 
@@ -138,7 +174,8 @@ The agent installs as a Windows Service (`GRDSIEMAgent`) using NSSM. Configurati
 | `logging.max_size_mb` | | `100` | Max log file size |
 | `heartbeat.interval_seconds` | | `60` | Heartbeat frequency |
 | `update.enabled` | | `true` | Enable auto-updates |
-| `update.check_interval_hours` | | `6` | Update check frequency |
+| `update.check_interval_minutes` | | `10` | Update check frequency in minutes (takes priority over hours) |
+| `update.check_interval_hours` | | `0` | Update check frequency in hours (used if minutes is 0) |
 | `update.github_repo` | | `"KAPA-8/grd-siem-agent"` | GitHub repo for releases |
 | `update.allow_prerelease` | | `false` | Install pre-release versions |
 
@@ -182,7 +219,7 @@ grd-siem-agent version   # Print version information
 
 ## Auto-Updates
 
-The agent automatically checks GitHub Releases for new versions every 6 hours (configurable). When an update is found:
+The agent automatically checks GitHub Releases for new versions every 10 minutes (configurable). When an update is found:
 
 1. Downloads the binary for the current platform
 2. Verifies SHA256 checksum against `checksums.txt`
@@ -229,7 +266,7 @@ grd-siem-agent
 │   └── Stores failed batches, drains on next cycle
 ├── Heartbeat (background, every 60s)
 │   └── Reports uptime, memory, version, status
-└── Updater (background, every 6h)
+└── Updater (background, every 10min)
     └── Checks GitHub Releases, downloads, verifies, stages
 ```
 
@@ -276,7 +313,7 @@ SIEM (QRadar) ──poll──> Collector ──normalize──> Sender ──HT
 curl -Lo grd-siem-agent https://github.com/KAPA-8/grd-siem-agent/releases/latest/download/grd-siem-agent-linux-amd64
 chmod +x grd-siem-agent
 
-# 2. Download and run installer
+# 2. Download and run installer (no need to clone the repo)
 curl -Lo install.sh https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/install.sh
 sudo bash install.sh --binary ./grd-siem-agent
 
@@ -292,6 +329,56 @@ sudo systemctl start grd-siem-agent
 sudo systemctl status grd-siem-agent
 sudo journalctl -u grd-siem-agent -f
 ```
+
+### Minimal production config.yaml
+
+This is the minimum config needed to run the agent after registering from the GRD Dashboard:
+
+```yaml
+agent:
+  id: "agent-id-from-dashboard"
+  name: "GRD SIEM Agent"
+
+platform:
+  url: "https://your-platform.example.com"
+  agent_token: "grd_agent_xxxxx"
+
+siem:
+  type: "qradar"
+  connection_id: "uuid-from-dashboard"
+  api_url: "https://10.1.11.61"
+  credentials:
+    api_key: "your-qradar-sec-token"
+    validate_ssl: false
+
+sync:
+  interval_minutes: 5
+  lookback_days: 7
+  max_alerts_per_sync: 1000
+  filters:
+    min_severity: "low"
+
+buffer:
+  enabled: true
+  path: "/var/lib/grd-siem-agent/buffer.db"
+  max_size_mb: 500
+
+logging:
+  level: "info"
+  path: "/var/log/grd-siem-agent/agent.log"
+  max_size_mb: 100
+
+heartbeat:
+  interval_seconds: 60
+
+update:
+  enabled: true
+  check_interval_minutes: 10
+  github_repo: "KAPA-8/grd-siem-agent"
+  allow_prerelease: false
+```
+
+> **Important:** Always include the `update` section — without it, auto-updates will not work. With `check_interval_minutes: 10`, the agent will detect and apply new releases within 10 minutes of publishing.
 
 ### File permissions summary
 
@@ -313,7 +400,7 @@ The service runs with the following security hardening:
 - **ProtectHome:** `true`
 - **PrivateTmp:** `true`
 - **MemoryMax:** `200M` / **MemoryHigh:** `100M`
-- **ReadWritePaths:** `/var/lib/grd-siem-agent`, `/var/log/grd-siem-agent`
+- **ReadWritePaths:** `/var/lib/grd-siem-agent`, `/var/log/grd-siem-agent`, `/opt/grd-siem-agent`
 - **Restart:** `on-failure` with 10s delay
 
 ### Verifying the installation
@@ -404,16 +491,20 @@ sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent validate \
 
 | Issue | Cause | Solution |
 |-------|-------|----------|
-| `status=203/EXEC` in systemd | `apply-update.sh` missing or not executable | `sudo curl -Lo /opt/grd-siem-agent/apply-update.sh https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/apply-update.sh && sudo chmod 755 /opt/grd-siem-agent/apply-update.sh` |
-| `permission denied` on checkpoint | Checkpoint written to read-only `/etc/` | Update to v0.1.1+ (writes to `/var/lib/grd-siem-agent/`) |
-| `no releases found` on update | Missing `update.github_repo` in config | Add `update:` section with `github_repo: "KAPA-8/grd-siem-agent"` |
+| `status=203/EXEC` in systemd | `apply-update.sh` missing or not executable | Download it: `sudo curl -Lo /opt/grd-siem-agent/apply-update.sh https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/apply-update.sh && sudo chmod 755 /opt/grd-siem-agent/apply-update.sh` |
+| `cp: no se puede crear el fichero` in apply-update | `ExecStartPre` runs as `grd-agent` but `/opt/` is owned by root | Update to v0.1.3+ (uses `ExecStartPre=+` to run as root). Manual fix: change `ExecStartPre=/opt/...` to `ExecStartPre=+/opt/...` in the service file |
+| `permission denied` on checkpoint | Checkpoint written to read-only `/etc/` | Update to v0.1.1+ (writes to `/var/lib/grd-siem-agent/`). Manual fix: `sudo chown grd-agent:grd-agent /etc/grd-siem-agent/` |
+| `no releases found` on update | Missing `update` section in config | Add `update:` section with `github_repo: "KAPA-8/grd-siem-agent"` to config.yaml |
 | `registration failed (401)` | Bad org API key | Check `platform.org_api_key` (only needed for CLI registration) |
+| `org_api_key is required` | Trying CLI register, but registered from dashboard | You don't need CLI registration — just set `agent.id` and `platform.agent_token` from the dashboard |
 | `collector init: connection refused` | Can't reach SIEM | Verify `siem.api_url` is reachable: `curl -k https://SIEM_IP/api/help/versions` |
 | `sync failed (403)` | Invalid agent token | Verify `platform.agent_token` matches what dashboard/registration returned |
 | `certificate verify failed` | Self-signed SIEM cert | Set `siem.credentials.validate_ssl: false` |
+| QRadar `/system/about` returns 403 | API key lacks permission for that endpoint | Safe to ignore — the agent works via the offenses endpoint |
 | Agent not collecting alerts | Severity filter too strict | Lower `sync.filters.min_severity` (e.g., `"low"` or `"info"`) |
 | Buffer growing large | Platform unreachable | Check network/firewall to platform URL |
 | Binary won't execute | Wrong architecture | Run `file ./grd-siem-agent` — must show `ELF 64-bit` for Linux, not `Mach-O` (macOS) |
+| `unzip: cannot find zipfile` | Tried to unzip the binary | The binary is not a zip — run it directly with `./grd-siem-agent` |
 
 ### Force manual update
 
@@ -431,10 +522,31 @@ sudo systemctl restart grd-siem-agent
 curl -Lo uninstall.sh https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/uninstall.sh
 sudo bash uninstall.sh          # Keeps config and data
 sudo bash uninstall.sh --purge  # Removes everything
-
-# Windows (Administrator PowerShell)
-.\scripts\uninstall.ps1
 ```
+
+```powershell
+# Windows (Administrator PowerShell)
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/uninstall.ps1" -OutFile "uninstall.ps1"
+.\uninstall.ps1          # Keeps config and data
+.\uninstall.ps1 -Purge   # Removes everything
+```
+
+## Tested and Verified
+
+The following features have been validated in a production environment (Ubuntu Server, QRadar SIEM):
+
+- [x] Binary download and installation without cloning the repo
+- [x] Systemd service with security hardening (ProtectSystem=strict, NoNewPrivileges, MemoryMax)
+- [x] Agent registration from GRD Dashboard (recommended flow)
+- [x] QRadar offense collection via REST API
+- [x] Alert sync to GRD platform (34 alerts imported successfully)
+- [x] Heartbeat monitoring (60s interval)
+- [x] SQLite buffer for offline resilience
+- [x] Auto-update from GitHub Releases (v0.1.0 → v0.1.2 verified)
+- [x] Checkpoint persistence in `/var/lib/grd-siem-agent/`
+- [x] `apply-update.sh` running as root via `ExecStartPre=+`
+- [x] Cross-compilation for 5 platforms via GitHub Actions
+- [x] SHA256 checksum verification on updates
 
 ## License
 

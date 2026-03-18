@@ -113,18 +113,20 @@ if (Test-Path $configFile) {
         # Generate minimal config
         @"
 # GRD SIEM Agent Configuration
-# Edit this file, then run:
-#   & "C:\Program Files\GRD SIEM Agent\grd-siem-agent.exe" register --config "$configFile"
+# Edit this file with your actual values, then start the service.
+#
+# Register from the GRD Dashboard (recommended) or via CLI:
+#   CLI: & "C:\Program Files\GRD SIEM Agent\grd-siem-agent.exe" register --config "$configFile"
 
 agent:
-  id: ""
+  id: ""                    # From GRD Dashboard or CLI registration
   name: "GRD SIEM Agent"
   hostname: ""
 
 platform:
-  url: ""
-  agent_token: ""
-  org_api_key: ""
+  url: ""                   # Your GRD platform URL
+  agent_token: ""           # Token from dashboard or CLI registration
+  org_api_key: ""           # Org API key (only needed for CLI registration)
 
 siem:
   type: "qradar"
@@ -154,6 +156,12 @@ logging:
 
 heartbeat:
   interval_seconds: 60
+
+update:
+  enabled: true
+  check_interval_minutes: 10
+  github_repo: "KAPA-8/grd-siem-agent"
+  allow_prerelease: false
 "@ | Set-Content $configFile -Encoding UTF8
     }
     Write-Host "       Config created: $configFile"
@@ -199,20 +207,25 @@ Write-Host ""
 Write-Host "  1. Edit the config file:"
 Write-Host "     notepad `"$ConfigDir\config.yaml`"" -ForegroundColor White
 Write-Host ""
-Write-Host "  2. Set platform.url and platform.org_api_key, then register:"
-Write-Host "     & `"$InstallDir\grd-siem-agent.exe`" register --config `"$ConfigDir\config.yaml`"" -ForegroundColor White
+Write-Host "  2. Register the agent (choose one):" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "  3. Copy agent_id and agent_token into config.yaml"
+Write-Host "     Option A - From GRD Dashboard (recommended):"
+Write-Host "       Register in the web interface, then copy the agent_id"
+Write-Host "       and agent_token into config.yaml"
 Write-Host ""
-Write-Host "  4. Set SIEM connection details (api_url, api_key, connection_id)"
+Write-Host "     Option B - Via CLI:"
+Write-Host "       Set platform.url and platform.org_api_key, then run:"
+Write-Host "       & `"$InstallDir\grd-siem-agent.exe`" register --config `"$ConfigDir\config.yaml`"" -ForegroundColor White
 Write-Host ""
-Write-Host "  5. Validate config:"
+Write-Host "  3. Set SIEM connection details (api_url, api_key, connection_id)"
+Write-Host ""
+Write-Host "  4. Validate config:"
 Write-Host "     & `"$InstallDir\grd-siem-agent.exe`" validate --config `"$ConfigDir\config.yaml`"" -ForegroundColor White
 Write-Host ""
-Write-Host "  6. Start the service:"
+Write-Host "  5. Start the service:"
 Write-Host "     Start-Service $ServiceName" -ForegroundColor White
 Write-Host ""
-Write-Host "  7. Check status:"
+Write-Host "  6. Check status:"
 Write-Host "     Get-Service $ServiceName" -ForegroundColor White
 Write-Host "     Get-Content `"$LogDir\agent.log`" -Tail 50 -Wait" -ForegroundColor White
 Write-Host ""

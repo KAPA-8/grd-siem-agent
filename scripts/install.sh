@@ -185,7 +185,7 @@ heartbeat:
 
 update:
   enabled: true
-  check_interval_hours: 6
+  check_interval_minutes: 10
   github_repo: "KAPA-8/grd-siem-agent"
   allow_prerelease: false
 YAML

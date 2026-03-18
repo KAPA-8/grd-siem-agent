@@ -74,10 +74,11 @@ type HeartbeatConfig struct {
 }
 
 type UpdateConfig struct {
-	Enabled            bool   `mapstructure:"enabled"`
-	CheckIntervalHours int    `mapstructure:"check_interval_hours"`
-	GitHubRepo         string `mapstructure:"github_repo"`
-	AllowPrerelease    bool   `mapstructure:"allow_prerelease"`
+	Enabled              bool   `mapstructure:"enabled"`
+	CheckIntervalHours   int    `mapstructure:"check_interval_hours"`
+	CheckIntervalMinutes int    `mapstructure:"check_interval_minutes"`
+	GitHubRepo           string `mapstructure:"github_repo"`
+	AllowPrerelease      bool   `mapstructure:"allow_prerelease"`
 }
 
 // Load reads the configuration from the given YAML file path,

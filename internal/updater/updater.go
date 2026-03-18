@@ -87,7 +87,12 @@ func (u *Updater) Run(ctx context.Context) {
 		return
 	}
 
-	interval := time.Duration(u.cfg.CheckIntervalHours) * time.Hour
+	var interval time.Duration
+	if u.cfg.CheckIntervalMinutes > 0 {
+		interval = time.Duration(u.cfg.CheckIntervalMinutes) * time.Minute
+	} else {
+		interval = time.Duration(u.cfg.CheckIntervalHours) * time.Hour
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
