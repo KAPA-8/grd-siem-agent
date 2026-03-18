@@ -30,9 +30,14 @@ chmod +x grd-siem-agent
 
 ### 2. Install (Linux)
 
+Download the install script and run it:
+
 ```bash
-sudo ./scripts/install.sh --binary ./grd-siem-agent
+curl -Lo install.sh https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/install.sh
+sudo bash install.sh --binary ./grd-siem-agent
 ```
+
+> **Note:** The binary is a standalone executable with no file extension — this is normal for Linux/macOS. Do not attempt to unzip it.
 
 This creates:
 | Path | Purpose |
@@ -48,12 +53,17 @@ This creates:
 sudo nano /etc/grd-siem-agent/config.yaml
 ```
 
-Set your platform URL and organization API key:
+#### Option A: Register from the GRD Dashboard (recommended)
+
+Register the agent from the GRD platform web interface. The dashboard will provide you with an `agent_id` and `agent_token`. Then set them in the config:
 
 ```yaml
+agent:
+  id: "agent-id-from-dashboard"
+
 platform:
   url: "https://your-platform.example.com"
-  org_api_key: "your-org-api-key"
+  agent_token: "token-from-dashboard"
 
 siem:
   type: "qradar"
@@ -63,26 +73,20 @@ siem:
     api_key: "your-qradar-sec-token"
 ```
 
-### 4. Register
+#### Option B: Register via CLI
+
+If you prefer to register from the command line, set `platform.url` and `platform.org_api_key` in the config, then run:
 
 ```bash
 sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent register \
   --config /etc/grd-siem-agent/config.yaml
 ```
 
-Copy the returned `agent_id` and `agent_token` into your `config.yaml`:
-
-```yaml
-agent:
-  id: "returned-agent-id"
-
-platform:
-  agent_token: "returned-token"
-```
+Copy the returned `agent_id` and `agent_token` into your `config.yaml`.
 
 > **Important:** The token is shown only once. Save it immediately.
 
-### 5. Start
+### 4. Start
 
 ```bash
 sudo systemctl start grd-siem-agent

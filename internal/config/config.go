@@ -137,9 +137,13 @@ func LoadMinimal(path string) (*Config, error) {
 }
 
 // CheckpointPath returns the path to the checkpoint file.
-func CheckpointPath(configPath string) string {
-	dir := filepath.Dir(configPath)
-	return filepath.Join(dir, ".grd-agent-checkpoint")
+// It uses the buffer directory (writable by grd-agent) instead of the config
+// directory (which is typically read-only /etc/grd-siem-agent/).
+func CheckpointPath(cfg *Config) string {
+	if cfg.Buffer.Path != "" {
+		return filepath.Join(filepath.Dir(cfg.Buffer.Path), ".grd-agent-checkpoint")
+	}
+	return filepath.Join(os.TempDir(), ".grd-agent-checkpoint")
 }
 
 // validate checks that all required fields are set for run mode.

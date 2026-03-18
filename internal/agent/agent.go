@@ -70,7 +70,7 @@ func New(cfg *config.Config, configPath string) (*Agent, error) {
 		buf:            buf,
 		heartbeat:      hb,
 		updater:        upd,
-		checkpointPath: config.CheckpointPath(configPath),
+		checkpointPath: config.CheckpointPath(cfg),
 	}, nil
 }
 
