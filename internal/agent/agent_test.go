@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+
 	"github.com/grd-platform/grd-siem-agent/internal/buffer"
 	"github.com/grd-platform/grd-siem-agent/internal/collector"
 	"github.com/grd-platform/grd-siem-agent/internal/config"
@@ -154,6 +156,61 @@ func newTestAgent(t *testing.T, coll *fakeCollector, platform *fakePlatform, buf
 	a.retryCfg = transport.RetryConfig{InitialInterval: time.Millisecond, MaxInterval: 2 * time.Millisecond, MaxElapsedTime: 30 * time.Millisecond}
 	return a
 }
+
+// fakeClock is a simulated transport.Clock: its timers fire at once and move
+// the time forward by the wait, so the real /sync retry window (minutes) runs
+// instantly.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newFakeClock() *fakeClock {
+	return &fakeClock{now: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)}
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+func (c *fakeClock) NewTimer() backoff.Timer {
+	return &fakeTimer{clock: c, c: make(chan time.Time, 1)}
+}
+
+type fakeTimer struct {
+	clock *fakeClock
+	c     chan time.Time
+}
+
+func (t *fakeTimer) Start(d time.Duration) {
+	t.clock.Advance(d)
+	t.c <- t.clock.Now()
+}
+
+func (t *fakeTimer) Stop()               {}
+func (t *fakeTimer) C() <-chan time.Time { return t.c }
+
+// newOutageAgent wires an agent with the production /sync retry policy on a
+// simulated clock.
+func newOutageAgent(t *testing.T, coll *fakeCollector, platform *fakePlatform, buf buffer.Buffer) (*Agent, *fakeClock) {
+	t.Helper()
+	a := newAgent(testConfig(t), coll, platform, buf)
+	clock := newFakeClock()
+	a.retryCfg.Clock = clock
+	a.status.SetInit(nil)
+	a.healthEvery = time.Hour
+	return a, clock
+}
+
+var errPlatformDown = errors.New("sending sync: dial tcp 127.0.0.1:39999: connect: connection refused")
 
 func templates(prefix string, n int) []models.AlertImportTemplate {
 	out := make([]models.AlertImportTemplate, n)
@@ -405,6 +462,215 @@ func TestCollectAndSend_FailedChunkBuffersTheRestWithoutPilingUp(t *testing.T) {
 	}
 }
 
+// Regression (E2E P3): with the platform down the heartbeat stayed healthy
+// for the whole 30-minute retry window, the collection loop waited that long
+// and only then buffered the batch. Now the first failed attempt is reported
+// and the batch is buffered after a retry window of a few minutes, whether
+// the platform refuses connections or lets requests time out.
+func TestCollectAndSend_PlatformDownIsReportedAtOnceAndBufferedWithinMinutes(t *testing.T) {
+	tests := []struct {
+		name    string
+		attempt time.Duration // how long one failed POST takes
+	}{
+		{"connection refused", 0},
+		{"request timeout", 90 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			coll := &fakeCollector{}
+			coll.push(batchOf(3, "cp-2"), nil)
+			var a *Agent
+			var clock *fakeClock
+			var seen []health.Report // the status the heartbeat would send during each retry
+			platform := &fakePlatform{respond: func(call int, _ models.SyncPayload) (*models.SyncResponse, error) {
+				if call > 0 {
+					seen = append(seen, a.status.Report())
+				}
+				clock.Advance(tt.attempt)
+				return nil, errPlatformDown
+			}}
+			buf := newSQLiteBuffer(t)
+			a, clock = newOutageAgent(t, coll, platform, buf)
+			a.checkpoint = "cp-1"
+
+			start := clock.Now()
+			a.collectAndSend(context.Background())
+			elapsed := clock.Now().Sub(start)
+
+			if len(seen) == 0 {
+				t.Fatal("the failed POST was not retried")
+			}
+			for i, r := range seen {
+				if r.Status != health.StatusDegraded || !strings.Contains(r.Detail, "connection refused") {
+					t.Fatalf("status during retry %d = %+v, want degraded with the delivery error", i+1, r)
+				}
+			}
+			if elapsed > 5*time.Minute {
+				t.Errorf("the cycle waited %s for the platform, want at most 5 minutes", elapsed)
+			}
+			if n := bufLen(t, buf); n != 1 {
+				t.Errorf("buffered = %d, want the batch stored when the retry window closed", n)
+			}
+			if _, saved := savedCheckpoint(t, a); saved || a.checkpoint != "cp-1" {
+				t.Errorf("checkpoint advanced to %q", a.checkpoint)
+			}
+			if r := a.status.Report(); r.Status != health.StatusDegraded || r.BufferedBatches != 1 {
+				t.Errorf("status after the cycle = %+v", r)
+			}
+		})
+	}
+}
+
+// A retry that succeeds clears the delivery error at once, before the next
+// chunk is sent.
+func TestCollectAndSend_RetrySuccessClearsTheDeliveryError(t *testing.T) {
+	coll := &fakeCollector{}
+	coll.push(batchOf(700, "cp-2"), nil) // two chunks
+	var a *Agent
+	var seen []string
+	platform := &fakePlatform{respond: func(call int, p models.SyncPayload) (*models.SyncResponse, error) {
+		seen = append(seen, a.status.Report().Status)
+		if call < 2 {
+			return nil, &transport.HTTPError{Op: "sync", StatusCode: 503, Body: "unavailable"}
+		}
+		return okResponse(p), nil
+	}}
+	a, _ = newOutageAgent(t, coll, platform, buffer.NewMemoryBuffer())
+
+	a.collectAndSend(context.Background())
+
+	// chunk 1: fails, fails, succeeds; chunk 2: succeeds
+	want := []string{health.StatusHealthy, health.StatusDegraded, health.StatusDegraded, health.StatusHealthy}
+	if !reflect.DeepEqual(seen, want) {
+		t.Errorf("status seen by each POST = %v, want %v", seen, want)
+	}
+	if r := a.status.Report(); r.Status != health.StatusHealthy || a.checkpoint != "cp-2" {
+		t.Errorf("after the cycle: %+v, checkpoint %q", r, a.checkpoint)
+	}
+}
+
+// A partial import is still reported after the next chunk succeeds.
+func TestCollectAndSend_PartialChunkStaysReportedAfterALaterChunk(t *testing.T) {
+	coll := &fakeCollector{}
+	coll.push(batchOf(700, "cp-2"), nil)
+	var a *Agent
+	var seen []string
+	platform := &fakePlatform{respond: func(call int, p models.SyncPayload) (*models.SyncResponse, error) {
+		seen = append(seen, a.status.Report().Status)
+		switch call {
+		case 0:
+			return &models.SyncResponse{Success: true, AlertsImported: len(p.Alerts) - 1, AlertsErrors: 1}, nil
+		case 1:
+			return nil, &transport.HTTPError{Op: "sync", StatusCode: 503, Body: "unavailable"}
+		}
+		return okResponse(p), nil
+	}}
+	a, _ = newOutageAgent(t, coll, platform, buffer.NewMemoryBuffer())
+
+	a.collectAndSend(context.Background())
+
+	if want := []string{health.StatusHealthy, health.StatusDegraded, health.StatusDegraded}; !reflect.DeepEqual(seen, want) {
+		t.Errorf("status seen by each POST = %v, want %v", seen, want)
+	}
+	if r := a.status.Report(); r.Status != health.StatusDegraded || !strings.Contains(r.Detail, "only partially") || a.checkpoint != "" {
+		t.Errorf("after the cycle: %+v, checkpoint %q", r, a.checkpoint)
+	}
+}
+
+// With the short retry window an outage spans many cycles. Each one buffers
+// the re-collected window under the same keys (one copy per chunk, the newest
+// one); once the platform is back every buffered chunk is posted once, the
+// checkpoint advances and no alert is lost. (The re-collection right after the
+// drain repeats the drained alerts; the platform deduplicates on externalId.)
+func TestCycle_OutageBuffersOneCopyPerChunkAndRecoversWithoutLoss(t *testing.T) {
+	coll := &fakeCollector{}
+	sizes := []int{700, 710, 720} // the same window, growing while the platform is down
+	for _, n := range sizes {
+		coll.push(batchOf(n, "cp-2"), nil)
+	}
+	coll.push(batchOf(730, "cp-2"), nil) // recovery cycle
+	down := true
+	platform := &fakePlatform{respond: func(_ int, p models.SyncPayload) (*models.SyncResponse, error) {
+		if down {
+			return nil, errPlatformDown
+		}
+		return okResponse(p), nil
+	}}
+	buf := newSQLiteBuffer(t)
+	a, clock := newOutageAgent(t, coll, platform, buf)
+	a.checkpoint = "cp-1"
+	ctx := context.Background()
+
+	for i, n := range sizes {
+		start := clock.Now()
+		a.cycle(ctx)
+		if d := clock.Now().Sub(start); d > 5*time.Minute {
+			t.Errorf("outage cycle %d waited %s for the platform", i+1, d)
+		}
+		batches, err := buf.Peek(0, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(batches) != 2 {
+			t.Fatalf("outage cycle %d: buffer holds %d batches, want the window's 2 chunks once", i+1, len(batches))
+		}
+		if got := len(batches[0].Payload.Alerts) + len(batches[1].Payload.Alerts); got != n {
+			t.Errorf("outage cycle %d: buffered %d alerts, want the newest copy (%d)", i+1, got, n)
+		}
+		if a.checkpoint != "cp-1" {
+			t.Fatalf("checkpoint advanced to %q during the outage", a.checkpoint)
+		}
+	}
+	if r := a.heartbeatStatus(ctx); r.Status != health.StatusDegraded || r.BufferedBatches != 2 {
+		t.Errorf("status during the outage = %+v", r)
+	}
+
+	down = false
+	before := len(platform.sent())
+	a.cycle(ctx)
+	recovery := platform.sent()[before:]
+	if len(recovery) != 4 {
+		t.Fatalf("recovery cycle posted %d chunks, want the 2 buffered ones and the 2 re-collected ones", len(recovery))
+	}
+	drained := map[string]int{}
+	for _, p := range recovery[:2] {
+		for _, al := range p.Alerts {
+			drained[al.ExternalID]++
+		}
+	}
+	for id, n := range drained {
+		if n != 1 {
+			t.Errorf("buffered alert %s posted %d times by the drain", id, n)
+		}
+	}
+	if len(drained) != 720 {
+		t.Errorf("drain posted %d alerts, want the 720 of the newest buffered copy", len(drained))
+	}
+	delivered := map[string]bool{}
+	for _, p := range recovery {
+		for _, al := range p.Alerts {
+			delivered[al.ExternalID] = true
+		}
+	}
+	for _, id := range externalIDsOf(templates("a", 730)) {
+		if !delivered[id] {
+			t.Errorf("alert %s was never delivered", id)
+		}
+	}
+	if saved, _ := savedCheckpoint(t, a); saved != "cp-2" {
+		t.Errorf("saved checkpoint = %q, want cp-2", saved)
+	}
+	if r := a.heartbeatStatus(ctx); r.Status != health.StatusHealthy || r.BufferedBatches != 0 {
+		t.Errorf("status after recovery = %+v", r)
+	}
+
+	before = len(platform.sent())
+	a.cycle(ctx)
+	if got := len(platform.sent()) - before; got != 0 {
+		t.Errorf("the cycle after recovery posted %d chunks, want none", got)
+	}
+}
+
 func TestCollectAndSend_NothingNewStillPersistsAChangedCheckpoint(t *testing.T) {
 	coll := &fakeCollector{}
 	coll.push(collector.Batch{Checkpoint: "normalized"}, nil)
@@ -597,6 +863,33 @@ func TestDrainBuffer_RefusedThenAcceptedBatchIsDelivered(t *testing.T) {
 	a.drainBuffer(context.Background())
 	if n := bufLen(t, buf); n != 0 || len(platform.sent()) != 2 {
 		t.Errorf("buffered = %d, posts = %d; want the batch delivered on the second drain", n, len(platform.sent()))
+	}
+}
+
+// A delivered buffered batch clears the delivery error: the platform is
+// reachable again, so the heartbeat recovers without waiting for a collection.
+func TestDrainBuffer_DeliveryClearsTheDeliveryError(t *testing.T) {
+	buf := buffer.NewMemoryBuffer()
+	pushBatches(t, buf, "b1")
+	down := true
+	platform := &fakePlatform{respond: func(_ int, p models.SyncPayload) (*models.SyncResponse, error) {
+		if down {
+			return nil, errPlatformDown
+		}
+		return okResponse(p), nil
+	}}
+	a := newTestAgent(t, &fakeCollector{}, platform, buf)
+	a.status.SetInit(nil)
+	a.healthEvery = time.Hour
+
+	a.drainBuffer(context.Background())
+	if r := a.heartbeatStatus(context.Background()); r.Status != health.StatusDegraded || !strings.Contains(r.Detail, "delivery to the platform failed") {
+		t.Errorf("status after a failed drain = %+v", r)
+	}
+	down = false
+	a.drainBuffer(context.Background())
+	if r := a.heartbeatStatus(context.Background()); r.Status != health.StatusHealthy || r.BufferedBatches != 0 {
+		t.Errorf("status after the buffer was delivered = %+v, want healthy", r)
 	}
 }
 

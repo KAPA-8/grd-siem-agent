@@ -15,14 +15,36 @@ type RetryConfig struct {
 	InitialInterval time.Duration
 	MaxInterval     time.Duration
 	MaxElapsedTime  time.Duration
+
+	// Clock measures MaxElapsedTime and waits between attempts. nil means
+	// the system clock; tests simulate a retry window of minutes with it.
+	Clock Clock
 }
 
-// DefaultRetryConfig returns sensible defaults for retry behavior.
-func DefaultRetryConfig() RetryConfig {
+// Clock is the time source of WithRetry.
+type Clock interface {
+	Now() time.Time
+	// NewTimer returns the timer one retry loop waits on between attempts.
+	NewTimer() backoff.Timer
+}
+
+// SyncRetryConfig is the retry policy of POST /sync: 1s, 2s, 4s, ... up to
+// 30s between attempts, for at most 2 minutes.
+//
+// The window is longer than syncTimeout (90s), so a request that timed out
+// is retried at least once, and it rides out a platform restart or a short
+// network outage. It is short on purpose: the collection loop waits for it,
+// and an attempt that starts just before the window closes still runs for up
+// to syncTimeout, so a cycle waits at most about 3.5 minutes, well within the
+// default 15-minute interval. A longer outage is handled by the buffer (the
+// undelivered chunks are stored as soon as the window closes and every next
+// cycle retries them) and by the checkpoint, which only advances once the
+// alerts were delivered.
+func SyncRetryConfig() RetryConfig {
 	return RetryConfig{
 		InitialInterval: 1 * time.Second,
-		MaxInterval:     5 * time.Minute,
-		MaxElapsedTime:  30 * time.Minute,
+		MaxInterval:     30 * time.Second,
+		MaxElapsedTime:  2 * time.Minute,
 	}
 }
 
@@ -58,20 +80,37 @@ func IsPermanent(err error) bool {
 // The operation function should return nil on success.
 // It does not retry permanent errors (see IsPermanent) nor context cancellation.
 func WithRetry(ctx context.Context, cfg RetryConfig, operationName string, operation func() error) error {
+	return WithRetryNotify(ctx, cfg, operationName, operation, nil)
+}
+
+// WithRetryNotify is WithRetry with a callback run after every failed
+// attempt, the last one and a permanent error included, so the caller can
+// report the failure while the retries are still running. onFailure may be
+// nil.
+func WithRetryNotify(ctx context.Context, cfg RetryConfig, operationName string, operation func() error, onFailure func(error)) error {
 	b := backoff.NewExponentialBackOff()
 	b.InitialInterval = cfg.InitialInterval
 	b.MaxInterval = cfg.MaxInterval
 	b.MaxElapsedTime = cfg.MaxElapsedTime
 	b.Multiplier = 2
 
+	var timer backoff.Timer // nil: backoff's system timer
+	if cfg.Clock != nil {
+		b.Clock = cfg.Clock
+		timer = cfg.Clock.NewTimer()
+	}
+
 	bCtx := backoff.WithContext(b, ctx)
 
 	attempt := 0
-	err := backoff.Retry(func() error {
+	err := backoff.RetryNotifyWithTimer(func() error {
 		attempt++
 		err := operation()
 		if err == nil {
 			return nil
+		}
+		if onFailure != nil {
+			onFailure(err)
 		}
 		if IsPermanent(err) {
 			log.Error().
@@ -87,7 +126,7 @@ func WithRetry(ctx context.Context, cfg RetryConfig, operationName string, opera
 			Str("operation", operationName).
 			Msg("operation failed, retrying")
 		return err
-	}, bCtx)
+	}, bCtx, nil, timer)
 
 	if err != nil {
 		return fmt.Errorf("%s failed after %d attempts: %w", operationName, attempt, err)

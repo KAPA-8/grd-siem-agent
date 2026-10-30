@@ -126,7 +126,7 @@ func newAgent(cfg *config.Config, coll collector.Collector, sender PlatformClien
 			path:       config.CheckpointPath(cfg),
 			legacyPath: config.LegacyCheckpointPath(cfg),
 		},
-		retryCfg:    transport.DefaultRetryConfig(),
+		retryCfg:    transport.SyncRetryConfig(),
 		initRetry:   defaultInitRetry,
 		status:      &health.Tracker{},
 		healthEvery: healthCheckInterval,
@@ -297,6 +297,10 @@ func (a *Agent) cycle(ctx context.Context) {
 // collectAndSend performs one collection cycle and delivers the alerts in
 // chunks of at most maxAlertsPerPost.
 //
+// Each chunk is retried for the short transport.SyncRetryConfig window; the
+// heartbeat reports the failure from the first failed attempt, and a chunk
+// that still fails is buffered with the ones after it.
+//
 // The checkpoint advances only when every chunk was accepted with
 // success=true and alerts_errors=0 (limit_reached still counts: those alerts
 // were refused by the organization's quota, not lost in transit; so do
@@ -347,6 +351,9 @@ func (a *Agent) collectAndSend(ctx context.Context) {
 		if !acceptSyncResponse(resp, i+1, len(payloads)) {
 			deliveryErr = fmt.Errorf("platform imported chunk %d/%d only partially (success=%v, alerts_errors=%d)", i+1, len(payloads), resp.Success, resp.AlertsErrors)
 		}
+		// The platform answered: a failure reported by a retry gives way to
+		// this cycle's outcome so far.
+		a.status.SetDelivery(deliveryErr)
 	}
 
 	if ctx.Err() == nil {
@@ -436,12 +443,19 @@ func windowDates(batch collector.Batch) (string, string) {
 	return meta.DateFrom, meta.DateTo
 }
 
+// sendWithRetry posts one chunk with retries. Every failed attempt is
+// reported to the heartbeat at once, so the agent does not look healthy while
+// the platform is unreachable and the retries run.
 func (a *Agent) sendWithRetry(ctx context.Context, payload models.SyncPayload) (*models.SyncResponse, error) {
 	var resp *models.SyncResponse
-	err := transport.WithRetry(ctx, a.retryCfg, "sync", func() error {
+	err := transport.WithRetryNotify(ctx, a.retryCfg, "sync", func() error {
 		var sendErr error
 		resp, sendErr = a.sender.SendSync(ctx, payload)
 		return sendErr
+	}, func(err error) {
+		if ctx.Err() == nil {
+			a.status.SetDelivery(err)
+		}
 	})
 	return resp, err
 }
@@ -484,6 +498,7 @@ func (a *Agent) advanceCheckpoint(checkpoint string) {
 // past a batch the platform refuses (a permanent 4xx such as a deleted
 // connection, or a partial import) so it cannot block the batches behind it;
 // such a batch is dropped once it has been refused maxBufferedRejections times.
+// A delivered batch clears the delivery error reported to the heartbeat.
 func (a *Agent) drainBuffer(ctx context.Context) {
 	var afterID int64
 	delivered, kept, dropped := 0, 0, 0
@@ -529,6 +544,7 @@ func (a *Agent) drainBuffer(ctx context.Context) {
 			if err := a.buf.Ack(b.ID); err != nil {
 				log.Error().Err(err).Int64("batch", b.ID).Msg("failed to remove a delivered batch; it may be sent again")
 			}
+			a.status.SetDelivery(nil) // the platform is reachable again
 			delivered++
 		}
 	}

@@ -346,16 +346,24 @@ grd-siem-agent
 │   └── Stellar Cyber: alert index or cases, native MITRE ATT&CK data
 ├── Sender (HTTPS to GRD platform)
 │   ├── /api/v1/siem-agent/sync       → send alerts (batches of 500)
+│   │   └── Retried with backoff (1s, 2s, 4s ... up to 30s apart) for up
+│   │       to 2 minutes; each request times out after 90s. 4xx answers
+│   │       other than 408/429 are not retried
 │   └── /api/v1/siem-agent/heartbeat  → health status
 ├── Buffer (SQLite, offline resilience)
-│   └── Keeps undelivered batches until the platform accepts them; a batch
-│       the platform refuses 5 times (e.g. its connection was deleted) is
-│       dropped, since the checkpoint never passes undelivered alerts
+│   └── Stores the batches still undelivered when the retries run out (at
+│       most ~3.5 min after the first attempt) and keeps them until the
+│       platform accepts them; each cycle tries them again first. While the
+│       platform is down, the window re-collected every cycle replaces its
+│       buffered copy instead of piling up. A batch the platform refuses 5
+│       times (e.g. its connection was deleted) is dropped, since the
+│       checkpoint never passes undelivered alerts
 ├── Heartbeat (background, every 60s)
 │   └── Reports uptime, memory, version and status (the SIEM health check
 │       runs every 5 min, never while a collection is running):
-│       healthy, degraded (delivery problems, buffered batches)
-│       or error (SIEM unreachable, collector not initialized)
+│       healthy, degraded (delivery problems, reported from the first
+│       failed attempt; buffered batches) or error (SIEM unreachable,
+│       collector not initialized)
 └── Updater (background, every 10min)
     └── Checks GitHub Releases, downloads, verifies, stages
 ```
@@ -365,7 +373,7 @@ grd-siem-agent
 ```
 SIEM (QRadar) ──poll──> Collector ──normalize──> Sender ──HTTPS──> GRD Platform
                                         │
-                                   (on failure)
+                          (still failing after 2 min of retries)
                                         │
                                      Buffer (SQLite)
                                         │
@@ -600,6 +608,7 @@ sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent validate \
 | Agent shows **error** in the dashboard | The collector cannot reach or log into the SIEM | The heartbeat detail and the agent log show the cause; the agent keeps retrying |
 | QRadar `/system/about` returns 403 | API key lacks permission for that endpoint | Safe to ignore — the agent works via the offenses endpoint |
 | Agent not collecting alerts | Severity filter too strict | Lower `sync.filters.min_severity` (e.g., `"low"` or `"info"`) |
+| Agent shows **degraded** with `delivery to the platform failed` | `/sync` failed (5xx, 429, timeout or connection error). Shown from the first failed attempt | Check network/firewall/proxy to `platform.url`. After 2 minutes of retries the alerts are buffered and re-sent every cycle; the checkpoint does not advance until they are delivered |
 | Buffer growing large | Platform unreachable | Check network/firewall to platform URL |
 | `platform keeps refusing a buffered batch; dropping it` | A batch stored during an outage was refused 5 times (e.g. its SIEM connection was deleted or re-created) | Nothing to do: the batch is dropped and the alerts of the current connection are collected again from the checkpoint |
 | Stellar Cyber `results are not sorted by write_time` | The alert search ignored `sort`, which incremental collection needs | Use `data_source: cases` and report the Stellar Cyber version |
