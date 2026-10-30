@@ -33,16 +33,22 @@ type PlatformConfig struct {
 }
 
 type SIEMConfig struct {
-	Type         string           `mapstructure:"type"`
-	APIURL       string           `mapstructure:"api_url"`
+	Type         string           `mapstructure:"type"`          // registered collector: qradar | stellar_cyber
+	APIURL       string           `mapstructure:"api_url"`       // SIEM API base URL
 	ConnectionID string           `mapstructure:"connection_id"` // Platform connection UUID
+	Deployment   string           `mapstructure:"deployment"`    // stellar_cyber: saas (default) | onprem
+	DataSource   string           `mapstructure:"data_source"`   // stellar_cyber: alerts (default) | cases
 	Credentials  CredentialConfig `mapstructure:"credentials"`
 }
 
 type CredentialConfig struct {
-	APIKey      string `mapstructure:"api_key"`
-	ValidateSSL bool   `mapstructure:"validate_ssl"`
-	APIVersion  string `mapstructure:"api_version"` // QRadar API version (default: "19.0")
+	Username    string `mapstructure:"username"`     // stellar_cyber api_token mode: account email (case-sensitive)
+	APIKey      string `mapstructure:"api_key"`      // QRadar SEC token / Stellar Cyber API token or scoped key
+	AuthMode    string `mapstructure:"auth_mode"`    // stellar_cyber: api_token (default) | scoped_key
+	TenantID    string `mapstructure:"tenant_id"`    // stellar_cyber: optional tenant (cust_id) filter
+	ValidateSSL bool   `mapstructure:"validate_ssl"` // verify the SIEM certificate (always on for Stellar Cyber SaaS)
+	CACertFile  string `mapstructure:"ca_cert_file"` // optional PEM bundle trusted in addition to the system roots
+	APIVersion  string `mapstructure:"api_version"`  // QRadar API version (default: "19.0")
 }
 
 type SyncConfig struct {

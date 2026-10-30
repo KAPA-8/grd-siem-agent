@@ -19,6 +19,7 @@ import (
 
 	// Register collectors via init()
 	_ "github.com/grd-platform/grd-siem-agent/internal/collector/qradar"
+	_ "github.com/grd-platform/grd-siem-agent/internal/collector/stellarcyber"
 )
 
 var configPath string

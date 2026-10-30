@@ -1,0 +1,202 @@
+{
+  "hits": {
+    "total": {
+      "value": 8,
+      "relation": "eq"
+    },
+    "hits": [
+      {
+        "_index": "stellar-index-v1-ser-org1-tenantA-2026.10.28-000001",
+        "_id": "a1-phishing-critical",
+        "_source": {
+          "timestamp": 1793196300000,
+          "write_time": 1793196390000,
+          "tenantid": "tenantA",
+          "tenant_name": "Acme",
+          "event_score": 85,
+          "severity": 80,
+          "fidelity": 90,
+          "threat_score": 70,
+          "event_status": "New",
+          "srcip": "203.0.113.10",
+          "dstip": "10.0.0.5",
+          "dstip_host": "mail-gw-01",
+          "srcip_host": "203.0.113.10",
+          "xdr_event": {
+            "name": "proofpoint_tap-messagesblocked-initial_access-phishing",
+            "display_name": "Proofpoint TAP messagesBlocked: Phishing",
+            "xdr_killchain_stage": "Initial Attempts",
+            "tactic": {
+              "id": "TA0001",
+              "name": "Initial Access"
+            },
+            "technique": {
+              "id": "T1566",
+              "name": "Phishing"
+            }
+          }
+        }
+      },
+      {
+        "_index": "stellar-index-v1-ser-org1-tenantA-2026.10.28-000001",
+        "_id": "a2-bruteforce-subtech",
+        "_source": {
+          "timestamp": 1793156400000,
+          "write_time": 1793156460000,
+          "tenantid": "tenantA",
+          "tenant_name": "Acme",
+          "event_score": 65.5,
+          "event_status": "In Progress",
+          "srcip": "198.51.100.7",
+          "dstip": "10.0.0.20",
+          "hostname": "dc-01",
+          "xdr_event": {
+            "name": "login_failure_burst",
+            "display_name": "Password Guessing Burst",
+            "tactic": {
+              "id": "TA0006",
+              "name": "Credential Access"
+            },
+            "technique": {
+              "id": "t1110.001",
+              "name": "Password Guessing"
+            }
+          }
+        }
+      },
+      {
+        "_index": "stellar-index-v1-ser-org1-tenantB-2026.10.27-000002",
+        "_id": "a3-xdr-malware",
+        "_source": {
+          "timestamp": 1793102400000,
+          "write_time": 1793102405000,
+          "tenantid": "tenantB",
+          "tenant_name": "Beta",
+          "event_score": 45,
+          "event_status": "New",
+          "srcip": "10.1.1.4",
+          "host": "ws-042",
+          "xdr_event": {
+            "name": "malware_on_disk",
+            "display_name": "Malware on Disk",
+            "tactic": {
+              "id": "XTA0006",
+              "name": "XDR Malware"
+            },
+            "technique": {
+              "id": "XT3001",
+              "name": "Malware Detected"
+            }
+          }
+        }
+      },
+      {
+        "_index": "stellar-index-v1-ser-org1-tenantA-2026.10.26-000003",
+        "_id": "a4-ttps-only",
+        "_source": {
+          "timestamp": 1793003400000,
+          "write_time": 1793003460000,
+          "tenantid": "tenantA",
+          "event_score": 30,
+          "event_status": "Closed",
+          "srcip": "10.0.0.8",
+          "dstip": "192.0.2.44",
+          "srcip_host": "fileserver-02",
+          "xdr_event": {
+            "name": "exfil_over_c2",
+            "display_name": "Data Exfiltration Over C2",
+            "ttps": [
+              {
+                "tactic": {
+                  "id": "TA0010",
+                  "name": "Exfiltration"
+                },
+                "technique": {
+                  "id": "T1041",
+                  "name": "Exfiltration Over C2 Channel"
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "_index": "stellar-index-v1-ser-org1-tenantA-2026.10.25-000004",
+        "_id": "a5-no-mitre-iso-ts",
+        "_source": {
+          "timestamp": "2026-10-25T10:15:00Z",
+          "write_time": 1792923360000,
+          "tenantid": "tenantA",
+          "severity": 10,
+          "event_name": "Uncommon Process Anomaly",
+          "event_status": "New"
+        }
+      },
+      {
+        "_index": "stellar-index-v1-ser-org1-tenantA-2026.10.29-000005",
+        "_id": "a6-ignored-midnight",
+        "_source": {
+          "timestamp": 1793318399999,
+          "write_time": 1793318410000,
+          "tenantid": "tenantA",
+          "event_score": 80,
+          "event_status": "Ignored",
+          "srcip": "10.0.0.9",
+          "xdr_event": {
+            "display_name": "Port Scan",
+            "tactic": {
+              "id": "TA0007",
+              "name": "Discovery"
+            },
+            "technique": {
+              "id": "T1046",
+              "name": "Network Service Discovery"
+            }
+          }
+        }
+      },
+      {
+        "_index": "stellar-index-v1-ser-org1-tenantA-2026.10.29-000005",
+        "_id": "a7-boundary-79",
+        "_source": {
+          "timestamp": 1793232000000,
+          "write_time": 1793232001000,
+          "tenantid": "tenantA",
+          "event_score": 79.99,
+          "event_status": "New",
+          "xdr_event": {
+            "display_name": "Ransomware Behaviour",
+            "tactic": {
+              "id": "TA0040",
+              "name": "Impact"
+            },
+            "technique": {
+              "id": "T1486",
+              "name": "Data Encrypted for Impact"
+            }
+          }
+        }
+      },
+      {
+        "_index": "stellar-index-v1-ser-org1-tenantA-2026.10.29-000005",
+        "_id": "a8-boundary-19",
+        "_source": {
+          "timestamp": 1793253600000,
+          "write_time": 1793253601000,
+          "tenantid": "tenantA",
+          "event_score": 19.99,
+          "fidelity": 10,
+          "xdr_event": {
+            "name": "dns_tunnel_suspect",
+            "tactic": {
+              "name": "Command and Control"
+            },
+            "technique": {
+              "name": "Protocol Tunneling"
+            }
+          }
+        }
+      }
+    ]
+  }
+}

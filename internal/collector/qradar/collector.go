@@ -12,6 +12,7 @@ import (
 	"github.com/grd-platform/grd-siem-agent/internal/config"
 	"github.com/grd-platform/grd-siem-agent/internal/mapping"
 	"github.com/grd-platform/grd-siem-agent/internal/models"
+	"github.com/grd-platform/grd-siem-agent/internal/siemhttp"
 )
 
 // Ensure QRadarCollector implements collector.Collector at compile time.
@@ -25,13 +26,22 @@ type QRadarCollector struct {
 	fetchNotes bool
 }
 
-// NewCollector creates a new QRadar collector.
-func NewCollector(siemCfg config.SIEMConfig, syncCfg config.SyncConfig) *QRadarCollector {
-	client := NewClient(
+// NewCollector creates a new QRadar collector. It fails when the configured
+// ca_cert_file cannot be loaded.
+func NewCollector(siemCfg config.SIEMConfig, syncCfg config.SyncConfig) (*QRadarCollector, error) {
+	httpClient, err := siemhttp.NewClient(siemhttp.Options{
+		InsecureSkipVerify: !siemCfg.Credentials.ValidateSSL,
+		CAFile:             siemCfg.Credentials.CACertFile,
+		Timeout:            httpTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("qradar: %w", err)
+	}
+	client := newClientWithHTTP(
 		siemCfg.APIURL,
 		siemCfg.Credentials.APIKey,
-		siemCfg.Credentials.ValidateSSL,
 		siemCfg.Credentials.APIVersion,
+		httpClient,
 	)
 
 	lookbackMs := time.Duration(syncCfg.LookbackDays) * 24 * time.Hour
@@ -41,7 +51,7 @@ func NewCollector(siemCfg config.SIEMConfig, syncCfg config.SyncConfig) *QRadarC
 		syncCfg:    syncCfg,
 		lookbackMs: lookbackMs.Milliseconds(),
 		fetchNotes: true,
-	}
+	}, nil
 }
 
 func (c *QRadarCollector) Name() string {
@@ -205,6 +215,6 @@ func severityToQRadarMin(severity string) int {
 // init registers the QRadar collector in the collector registry.
 func init() {
 	collector.Register("qradar", func(cfg config.SIEMConfig, syncCfg config.SyncConfig) (collector.Collector, error) {
-		return NewCollector(cfg, syncCfg), nil
+		return NewCollector(cfg, syncCfg)
 	}, nil)
 }
