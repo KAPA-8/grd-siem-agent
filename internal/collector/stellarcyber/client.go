@@ -202,6 +202,9 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, out
 				return nil, err
 			}
 			req.Header.Set("Accept", "application/json")
+			// The /connect/api/data passthrough answers 406 "Content-Type header [] is
+			// not supported" to a GET without it, even with no body (seen on SaaS).
+			req.Header.Set("Content-Type", "application/json")
 			req.Header.Set("Authorization", header)
 			return req, nil
 		})

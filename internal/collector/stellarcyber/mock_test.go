@@ -235,6 +235,9 @@ func (m *mockStellar) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	case r.URL.Path == searchPath && r.Header.Get("Content-Type") == "":
+		// Same answer as the real SaaS passthrough to a GET without Content-Type
+		writeJSON(w, http.StatusNotAcceptable, map[string]any{"error": "Content-Type header [] is not supported", "status": 406})
 	case r.URL.Path == searchPath:
 		m.handleSearch(w, r)
 	case r.URL.Path == casesHealthAPI:
