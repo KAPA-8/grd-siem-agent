@@ -9,13 +9,13 @@ type RemoteConfig struct {
 
 // RemoteConnection describes a SIEM connection assigned to this agent.
 type RemoteConnection struct {
-	ID          string                 `json:"id"`
-	SIEMType    string                 `json:"siem_type"`
-	Name        string                 `json:"name"`
-	APIURL      string                 `json:"api_url"`
-	Credentials RemoteCredentials      `json:"credentials"`
-	LookbackDays int                   `json:"lookback_days"`
-	Filters     map[string]string      `json:"filters"`
+	ID           string            `json:"id"`
+	SIEMType     string            `json:"siem_type"`
+	Name         string            `json:"name"`
+	APIURL       string            `json:"api_url"`
+	Credentials  RemoteCredentials `json:"credentials"`
+	LookbackDays int               `json:"lookback_days"`
+	Filters      map[string]string `json:"filters"`
 }
 
 // RemoteCredentials holds SIEM credentials from the platform.
