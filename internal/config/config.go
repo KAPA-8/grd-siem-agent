@@ -80,6 +80,17 @@ type UpdateConfig struct {
 	AllowPrerelease      bool   `mapstructure:"allow_prerelease"`
 }
 
+// siemValidator validates the siem section against the collector registry.
+// The collector package installs it from its init(); config cannot import the
+// registry directly because collectors depend on config.
+var siemValidator func(SIEMConfig) error
+
+// SetSIEMValidator installs the function that validates siem.type and the
+// type-specific settings. Called by the collector registry at init.
+func SetSIEMValidator(fn func(SIEMConfig) error) {
+	siemValidator = fn
+}
+
 // Load reads the configuration from the given YAML file path,
 // applies defaults, binds environment variables, and validates.
 func Load(path string) (*Config, error) {
@@ -160,9 +171,10 @@ func validate(cfg *Config) error {
 		return fmt.Errorf("siem.type is required")
 	}
 
-	validSIEMTypes := map[string]bool{"qradar": true, "splunk": true, "sentinel": true}
-	if !validSIEMTypes[cfg.SIEM.Type] {
-		return fmt.Errorf("siem.type must be one of: qradar, splunk, sentinel (got: %s)", cfg.SIEM.Type)
+	if siemValidator != nil {
+		if err := siemValidator(cfg.SIEM); err != nil {
+			return err
+		}
 	}
 
 	if cfg.Sync.IntervalMinutes < 1 {

@@ -31,6 +31,17 @@ type Alert struct {
 	SourceID   string `json:"source_id"`
 	SourceType string `json:"source_type"`
 
+	// ExternalID is the stable identifier of the alert in the source SIEM.
+	// The platform deduplicates on (connection, externalId), so it must not
+	// change when the alert is re-collected.
+	ExternalID string `json:"external_id,omitempty"`
+
+	// Native MITRE ATT&CK data, when the SIEM provides it. When TechniqueID is
+	// empty the mapping package falls back to keyword heuristics.
+	TechniqueID   string `json:"technique_id,omitempty"`
+	TechniqueName string `json:"technique_name,omitempty"`
+	Tactic        string `json:"tactic,omitempty"` // tactic ID (TA0006) or name
+
 	// Classification
 	Title       string      `json:"title"`
 	Description string      `json:"description"`
@@ -85,15 +96,24 @@ type AlertNote struct {
 }
 
 // AlertImportTemplate is the format the platform API expects for alert ingestion.
-// This matches the AlertImportTemplate type on the Next.js platform.
+// This matches the AlertImportTemplate type on the Next.js platform
+// (lib/cyberrisk/types/fair-quantification.ts).
 type AlertImportTemplate struct {
+	// ExternalID is the stable SIEM-side ID; the platform deduplicates on it per connection.
+	ExternalID    string `json:"externalId,omitempty"`
 	TechniqueID   string `json:"techniqueId"`
-	TechniqueName string `json:"techniqueName"`
+	TechniqueName string `json:"techniqueName,omitempty"`
 	Description   string `json:"description"`
-	AlertDate     string `json:"alertDate"` // YYYY-MM-DD
+	AlertDate     string `json:"alertDate"` // YYYY-MM-DD (UTC)
 	Severity      string `json:"severity"`  // critical, high, medium, low, info
 	SourceIP      string `json:"sourceIp,omitempty"`
 	DestinationIP string `json:"destinationIp,omitempty"`
 	AssetName     string `json:"assetName,omitempty"`
-	ImpactType    string `json:"impactType,omitempty"`
+	// ImpactType is normally left empty: the platform resolves it from the
+	// technique catalog and, failing that, from Tactic.
+	ImpactType string `json:"impactType,omitempty"`
+	// Tactic is a MITRE tactic ID (TA0010), name (Exfiltration) or snake_case name.
+	Tactic string `json:"tactic,omitempty"`
+	// RawData is compact source metadata stored in cyberrisk_alert_records.raw_data.
+	RawData map[string]any `json:"rawData,omitempty"`
 }

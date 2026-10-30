@@ -13,6 +13,9 @@ func MapOffenseToAlert(offense QRadarOffense) models.Alert {
 		ID:         fmt.Sprintf("qradar:offense:%d", offense.ID),
 		SourceID:   fmt.Sprintf("%d", offense.ID),
 		SourceType: "qradar",
+		// Same format as the platform's direct QRadar adapter, so an offense
+		// that is re-collected after an update is deduplicated.
+		ExternalID: fmt.Sprintf("qradar-offense-%d", offense.ID),
 
 		Title:       offense.Description,
 		Description: offense.Description,
@@ -36,6 +39,17 @@ func MapOffenseToAlert(offense QRadarOffense) models.Alert {
 		DestinationNetworks: offense.DestinationNetworks,
 
 		Rules: mapRules(offense.Rules),
+
+		RawData: map[string]any{
+			"source":      "qradar",
+			"offenseId":   offense.ID,
+			"status":      offense.Status,
+			"magnitude":   offense.Magnitude,
+			"credibility": offense.Credibility,
+			"relevance":   offense.Relevance,
+			"eventCount":  offense.EventCount,
+			"lastUpdated": epochMsToTime(offense.LastUpdatedTime).UTC().Format(time.RFC3339),
+		},
 	}
 
 	// Use offense source as source IP if it looks like an IP
@@ -49,37 +63,6 @@ func MapOffenseToAlert(offense QRadarOffense) models.Alert {
 	}
 
 	return alert
-}
-
-// AlertToImportTemplate converts an internal Alert to the platform's AlertImportTemplate format.
-// This is the format POST /api/v1/siem-agent/sync expects.
-func AlertToImportTemplate(alert models.Alert) models.AlertImportTemplate {
-	// Extract MITRE technique from description and categories
-	mitre := ExtractMITRE(alert.Description, alert.Categories)
-
-	template := models.AlertImportTemplate{
-		TechniqueID:   mitre.TechniqueID,
-		TechniqueName: mitre.TechniqueName,
-		Description:   alert.Description,
-		AlertDate:     alert.CreatedAt.Format("2006-01-02"),
-		Severity:      string(alert.Severity),
-		ImpactType:    mitre.ImpactType,
-	}
-
-	// Set network context
-	if len(alert.SourceIPs) > 0 {
-		template.SourceIP = alert.SourceIPs[0]
-	}
-	if len(alert.DestinationIPs) > 0 {
-		template.DestinationIP = alert.DestinationIPs[0]
-	}
-
-	// Use offense source as asset name if available
-	if alert.Source != "" {
-		template.AssetName = alert.Source
-	}
-
-	return template
 }
 
 // MapNotes converts QRadar notes to the normalized AlertNote model.

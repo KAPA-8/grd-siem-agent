@@ -13,7 +13,6 @@ import (
 
 	"github.com/grd-platform/grd-siem-agent/internal/buffer"
 	"github.com/grd-platform/grd-siem-agent/internal/collector"
-	"github.com/grd-platform/grd-siem-agent/internal/collector/qradar"
 	"github.com/grd-platform/grd-siem-agent/internal/config"
 	"github.com/grd-platform/grd-siem-agent/internal/health"
 	"github.com/grd-platform/grd-siem-agent/internal/models"
@@ -142,46 +141,31 @@ func (a *Agent) Run(ctx context.Context) error {
 func (a *Agent) collectAndSend(ctx context.Context, checkpoint string) string {
 	log.Info().Msg("starting collection cycle")
 
-	alerts, newCheckpoint, err := a.coll.Collect(ctx, checkpoint)
+	batch, err := a.coll.Collect(ctx, checkpoint)
 	if err != nil {
 		log.Error().Err(err).Msg("collection failed")
 		return checkpoint
 	}
+	newCheckpoint := batch.Checkpoint
+	templates := batch.Templates
 
-	if len(alerts) == 0 {
+	if len(templates) == 0 {
 		log.Info().Msg("no new alerts to send")
 		return checkpoint
 	}
 
-	// Convert internal alerts to platform format (AlertImportTemplate)
-	templates := make([]models.AlertImportTemplate, 0, len(alerts))
-	for _, alert := range alerts {
-		templates = append(templates, qradar.AlertToImportTemplate(alert))
-	}
-
-	// Determine date range for sync metadata
-	dateFrom := alerts[0].CreatedAt
-	dateTo := alerts[len(alerts)-1].UpdatedAt
-	for _, alert := range alerts {
-		if alert.CreatedAt.Before(dateFrom) {
-			dateFrom = alert.CreatedAt
-		}
-		if alert.UpdatedAt.After(dateTo) {
-			dateTo = alert.UpdatedAt
-		}
-	}
-
-	// Build sync payload matching platform API contract
+	// Build sync payload matching platform API contract. The date range is
+	// the queried window, not the alerts' own timestamps.
 	payload := models.SyncPayload{
 		ConnectionID: a.cfg.SIEM.ConnectionID,
 		Alerts:       templates,
 		SyncMetadata: models.SyncMetadata{
-			DateFrom:          dateFrom.UTC().Format(time.RFC3339),
-			DateTo:            dateTo.UTC().Format(time.RFC3339),
+			DateFrom:          batch.WindowFrom.UTC().Format(time.RFC3339),
+			DateTo:            batch.WindowTo.UTC().Format(time.RFC3339),
 			SIEMType:          a.cfg.SIEM.Type,
-			TotalFetched:      len(alerts),
+			TotalFetched:      batch.Fetched,
 			TotalAfterFilter:  len(templates),
-			DuplicatesRemoved: 0,
+			DuplicatesRemoved: batch.DuplicatesRemoved,
 			AgentVersion:      version.Version,
 		},
 	}

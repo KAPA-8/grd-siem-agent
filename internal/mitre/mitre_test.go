@@ -1,19 +1,19 @@
-package qradar
+package mitre
 
 import "testing"
 
-func TestExtractMITRE_TCodeInDescription(t *testing.T) {
-	result := ExtractMITRE("Detected T1059.001 PowerShell execution", nil)
+func TestExtract_TCodeInDescription(t *testing.T) {
+	result := Extract("Detected T1059.001 PowerShell execution", nil)
 	if result.TechniqueID != "T1059.001" {
 		t.Errorf("TechniqueID = %q, want T1059.001", result.TechniqueID)
 	}
 }
 
-func TestExtractMITRE_CategoryMatch(t *testing.T) {
+func TestExtract_CategoryMatch(t *testing.T) {
 	tests := []struct {
 		categories []string
 		wantID     string
-		wantImpact string
+		wantTactic string
 	}{
 		{[]string{"Authentication"}, "T1110", "credential_access"},
 		{[]string{"Malware"}, "T1204", "execution"},
@@ -24,17 +24,17 @@ func TestExtractMITRE_CategoryMatch(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := ExtractMITRE("generic offense", tt.categories)
+		result := Extract("generic offense", tt.categories)
 		if result.TechniqueID != tt.wantID {
 			t.Errorf("categories=%v: TechniqueID = %q, want %q", tt.categories, result.TechniqueID, tt.wantID)
 		}
-		if result.ImpactType != tt.wantImpact {
-			t.Errorf("categories=%v: ImpactType = %q, want %q", tt.categories, result.ImpactType, tt.wantImpact)
+		if result.Tactic != tt.wantTactic {
+			t.Errorf("categories=%v: Tactic = %q, want %q", tt.categories, result.Tactic, tt.wantTactic)
 		}
 	}
 }
 
-func TestExtractMITRE_KeywordInDescription(t *testing.T) {
+func TestExtract_KeywordInDescription(t *testing.T) {
 	tests := []struct {
 		description string
 		wantID      string
@@ -46,15 +46,15 @@ func TestExtractMITRE_KeywordInDescription(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := ExtractMITRE(tt.description, nil)
+		result := Extract(tt.description, nil)
 		if result.TechniqueID != tt.wantID {
 			t.Errorf("desc=%q: TechniqueID = %q, want %q", tt.description, result.TechniqueID, tt.wantID)
 		}
 	}
 }
 
-func TestExtractMITRE_DefaultFallback(t *testing.T) {
-	result := ExtractMITRE("Something completely unrelated", []string{"CustomCategory"})
+func TestExtract_DefaultFallback(t *testing.T) {
+	result := Extract("Something completely unrelated", []string{"CustomCategory"})
 	if result.TechniqueID != "T1059" {
 		t.Errorf("expected default T1059 for unmatched input, got %q", result.TechniqueID)
 	}
@@ -63,7 +63,7 @@ func TestExtractMITRE_DefaultFallback(t *testing.T) {
 	}
 }
 
-func TestExtractMITRE_SpanishKeywords(t *testing.T) {
+func TestExtract_SpanishKeywords(t *testing.T) {
 	tests := []struct {
 		description string
 		wantID      string
@@ -75,7 +75,7 @@ func TestExtractMITRE_SpanishKeywords(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		result := ExtractMITRE(tt.description, nil)
+		result := Extract(tt.description, nil)
 		if result.TechniqueID != tt.wantID {
 			t.Errorf("desc=%q: TechniqueID = %q, want %q", tt.description, result.TechniqueID, tt.wantID)
 		}
