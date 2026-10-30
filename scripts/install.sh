@@ -7,6 +7,12 @@ set -euo pipefail
 # Usage:
 #   sudo ./install.sh
 #   sudo ./install.sh --binary /path/to/grd-siem-agent
+#   sudo ./install.sh --siem-type stellar_cyber
+#   ./install.sh --siem-type stellar_cyber --print-config   # print the config template only
+#
+# --siem-type selects the config template written to
+# /etc/grd-siem-agent/config.yaml on a first install: qradar (default)
+# or stellar_cyber. An existing config is never overwritten.
 # ============================================================
 
 AGENT_USER="grd-agent"
@@ -18,20 +24,142 @@ LOG_DIR="/var/log/grd-siem-agent"
 SERVICE_NAME="grd-siem-agent"
 
 BINARY_PATH=""
+SIEM_TYPE="qradar"
+PRINT_CONFIG=false
+
+usage() {
+    echo "Usage: $0 [--binary PATH] [--siem-type qradar|stellar_cyber] [--print-config]"
+}
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case $1 in
         --binary)
+            if [[ $# -lt 2 ]]; then echo "Error: --binary needs a path"; exit 1; fi
             BINARY_PATH="$2"
             shift 2
             ;;
+        --siem-type)
+            if [[ $# -lt 2 ]]; then echo "Error: --siem-type needs a value"; exit 1; fi
+            SIEM_TYPE="$2"
+            shift 2
+            ;;
+        --print-config)
+            PRINT_CONFIG=true
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
         *)
             echo "Unknown option: $1"
+            usage
             exit 1
             ;;
     esac
 done
+
+case "$SIEM_TYPE" in
+    qradar|stellar_cyber) ;;
+    *)
+        echo "Error: --siem-type must be qradar or stellar_cyber (got: $SIEM_TYPE)"
+        exit 1
+        ;;
+esac
+
+# siem_section prints the siem: block of the config template for a SIEM type.
+siem_section() {
+    case "$1" in
+        qradar)
+            cat << 'YAML'
+siem:
+  type: "qradar"
+  connection_id: ""         # Connection UUID from the GRD Dashboard
+  api_url: ""               # QRadar URL (e.g., https://192.168.1.50)
+  credentials:
+    api_key: ""             # QRadar SEC token (or GRD_SIEM_CREDENTIALS_API_KEY)
+    validate_ssl: false     # true if the console has a valid certificate (or use ca_cert_file)
+    ca_cert_file: ""        # optional PEM bundle of the console's CA
+    api_version: "19.0"
+YAML
+            ;;
+        stellar_cyber)
+            cat << 'YAML'
+siem:
+  type: "stellar_cyber"
+  connection_id: ""         # Connection UUID from the GRD Dashboard
+  api_url: ""               # SaaS: https://<tenant>.stellarcyber.cloud / on-prem: https://<data-processor>
+  deployment: "saas"        # saas | onprem
+  data_source: "alerts"     # alerts (root All-Access token, or scoped key on 6.3+) | cases
+  credentials:
+    auth_mode: "api_token"  # api_token (All-Access token + username) | scoped_key (5.5+)
+    username: ""            # api_token only: API account email (case-sensitive)
+    api_key: ""             # token or scoped key (or GRD_SIEM_CREDENTIALS_API_KEY)
+    tenant_id: ""           # optional: limit to one tenant (cust_id)
+    validate_ssl: true      # on-prem only; SaaS certificates are always verified
+    ca_cert_file: ""        # on-prem: PEM bundle of the Data Processor's CA
+YAML
+            ;;
+    esac
+}
+
+# config_template prints a complete config.yaml for a SIEM type.
+config_template() {
+    cat << 'YAML'
+# GRD SIEM Agent Configuration
+# Edit this file with your actual values, then run:
+#   sudo systemctl start grd-siem-agent
+#
+# Register the agent from the GRD Dashboard first, then copy
+# the agent_id and agent_token into this file. Every key can also be
+# set with an environment variable, e.g. GRD_PLATFORM_AGENT_TOKEN.
+
+agent:
+  id: ""                    # From GRD Dashboard
+  name: "GRD SIEM Agent"
+  hostname: ""
+
+platform:
+  url: ""                   # Your GRD platform URL (e.g., https://app.example.com)
+  agent_token: ""           # Token from GRD Dashboard
+
+YAML
+    siem_section "$1"
+    cat << 'YAML'
+
+sync:
+  interval_minutes: 15
+  lookback_days: 7
+  max_alerts_per_sync: 1000
+  filters:
+    min_severity: "medium"
+
+buffer:
+  enabled: true
+  path: "/var/lib/grd-siem-agent/buffer.db"
+  max_size_mb: 500
+
+logging:
+  level: "info"
+  path: "/var/log/grd-siem-agent/agent.log"
+  max_size_mb: 100
+
+heartbeat:
+  interval_seconds: 60
+
+update:
+  enabled: true
+  check_interval_minutes: 10
+  github_repo: "KAPA-8/grd-siem-agent"
+  allow_prerelease: false
+YAML
+}
+
+if [[ "$PRINT_CONFIG" == true ]]; then
+    config_template "$SIEM_TYPE"
+    exit 0
+fi
 
 # Must run as root
 if [[ $EUID -ne 0 ]]; then
@@ -122,73 +250,8 @@ if [[ -f "$CONFIG_DIR/config.yaml" ]]; then
     echo "       Config already exists, not overwriting"
     echo "       (existing: $CONFIG_DIR/config.yaml)"
 else
-    # Find example config
-    EXAMPLE_CONFIG=""
-    for candidate in \
-        "./configs/config.example.yaml" \
-        "./config.example.yaml"; do
-        if [[ -f "$candidate" ]]; then
-            EXAMPLE_CONFIG="$candidate"
-            break
-        fi
-    done
-
-    if [[ -n "$EXAMPLE_CONFIG" ]]; then
-        cp "$EXAMPLE_CONFIG" "$CONFIG_DIR/config.yaml"
-    else
-        # Generate minimal config
-        cat > "$CONFIG_DIR/config.yaml" << 'YAML'
-# GRD SIEM Agent Configuration
-# Edit this file with your actual values, then run:
-#   sudo systemctl start grd-siem-agent
-#
-# Register the agent from the GRD Dashboard first, then copy
-# the agent_id and agent_token into this file.
-
-agent:
-  id: ""                    # From GRD Dashboard
-  name: "GRD SIEM Agent"
-  hostname: ""
-
-platform:
-  url: ""                   # Your GRD platform URL (e.g., https://app.example.com)
-  agent_token: ""           # Token from GRD Dashboard
-
-siem:
-  type: "qradar"
-  connection_id: ""         # Connection UUID from the platform dashboard
-  api_url: ""               # QRadar URL (e.g., https://192.168.1.50)
-  credentials:
-    api_key: ""             # QRadar SEC token
-    validate_ssl: false
-
-sync:
-  interval_minutes: 15
-  lookback_days: 7
-  max_alerts_per_sync: 1000
-  filters:
-    min_severity: "medium"
-
-buffer:
-  enabled: true
-  path: "/var/lib/grd-siem-agent/buffer.db"
-  max_size_mb: 500
-
-logging:
-  level: "info"
-  path: "/var/log/grd-siem-agent/agent.log"
-  max_size_mb: 100
-
-heartbeat:
-  interval_seconds: 60
-
-update:
-  enabled: true
-  check_interval_minutes: 10
-  github_repo: "KAPA-8/grd-siem-agent"
-  allow_prerelease: false
-YAML
-    fi
+    config_template "$SIEM_TYPE" > "$CONFIG_DIR/config.yaml"
+    echo "       Template: $SIEM_TYPE"
 
     # Secure config file (contains API keys)
     chown root:"$AGENT_GROUP" "$CONFIG_DIR/config.yaml"
@@ -263,7 +326,14 @@ echo ""
 echo "  2. Register the agent from the GRD Dashboard:"
 echo "       Copy the agent_id and agent_token into config.yaml"
 echo ""
-echo "  3. Set the SIEM connection details (api_url, api_key, connection_id)"
+if [[ "$SIEM_TYPE" == "stellar_cyber" ]]; then
+    echo "  3. Set the Stellar Cyber connection: connection_id, api_url, deployment,"
+    echo "     data_source, auth_mode, username (api_token mode) and api_key"
+    echo "     (or GRD_SIEM_CREDENTIALS_API_KEY). For a self-signed on-prem"
+    echo "     Data Processor, set ca_cert_file (or validate_ssl: false)."
+else
+    echo "  3. Set the SIEM connection details (api_url, api_key, connection_id)"
+fi
 echo ""
 echo "  4. Validate config:"
 echo "     sudo -u $AGENT_USER $INSTALL_DIR/grd-siem-agent validate \\"
