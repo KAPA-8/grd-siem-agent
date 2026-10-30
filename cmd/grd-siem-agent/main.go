@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/grd-platform/grd-siem-agent/internal/agent"
+	"github.com/grd-platform/grd-siem-agent/internal/collector"
 	"github.com/grd-platform/grd-siem-agent/internal/config"
 	"github.com/grd-platform/grd-siem-agent/internal/logging"
 	"github.com/grd-platform/grd-siem-agent/internal/updater"
@@ -163,21 +164,43 @@ func validateCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("config validation failed: %w", err)
 			}
+			// Building the collector also checks files it needs (ca_cert_file).
+			coll, err := collector.New(cfg.SIEM, cfg.Sync)
+			if err != nil {
+				return fmt.Errorf("config validation failed: %w", err)
+			}
+			_ = coll.Close()
 
-			fmt.Printf("Config is valid.\n")
-			fmt.Printf("  Agent ID:      %s\n", cfg.Agent.ID)
-			fmt.Printf("  Agent Name:    %s\n", cfg.Agent.Name)
-			fmt.Printf("  SIEM Type:     %s\n", cfg.SIEM.Type)
-			fmt.Printf("  SIEM URL:      %s\n", cfg.SIEM.APIURL)
-			fmt.Printf("  Connection ID: %s\n", cfg.SIEM.ConnectionID)
-			fmt.Printf("  Platform:      %s\n", cfg.Platform.URL)
-			fmt.Printf("  Interval:      %d minutes\n", cfg.Sync.IntervalMinutes)
-			fmt.Printf("  Lookback:      %d days\n", cfg.Sync.LookbackDays)
-			fmt.Printf("  Buffer:        %v (%s)\n", cfg.Buffer.Enabled, cfg.Buffer.Path)
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Config is valid.\n")
+			fmt.Fprintf(out, "  Agent ID:      %s\n", cfg.Agent.ID)
+			fmt.Fprintf(out, "  Agent Name:    %s\n", cfg.Agent.Name)
+			fmt.Fprintf(out, "  SIEM Type:     %s\n", cfg.SIEM.Type)
+			fmt.Fprintf(out, "  SIEM URL:      %s\n", cfg.SIEM.APIURL)
+			if cfg.SIEM.Type == "stellar_cyber" {
+				fmt.Fprintf(out, "  Deployment:    %s\n", orDefault(cfg.SIEM.Deployment, "saas"))
+				fmt.Fprintf(out, "  Data source:   %s\n", orDefault(cfg.SIEM.DataSource, "alerts"))
+				fmt.Fprintf(out, "  Auth mode:     %s\n", orDefault(cfg.SIEM.Credentials.AuthMode, "api_token"))
+				fmt.Fprintf(out, "  Tenant:        %s\n", orDefault(cfg.SIEM.Credentials.TenantID, "(all)"))
+			}
+			fmt.Fprintf(out, "  Connection ID: %s\n", cfg.SIEM.ConnectionID)
+			fmt.Fprintf(out, "  Platform:      %s\n", cfg.Platform.URL)
+			fmt.Fprintf(out, "  Interval:      %d minutes\n", cfg.Sync.IntervalMinutes)
+			fmt.Fprintf(out, "  Lookback:      %d days\n", cfg.Sync.LookbackDays)
+			fmt.Fprintf(out, "  Max alerts:    %d per cycle\n", cfg.Sync.MaxAlertsPerSync)
+			fmt.Fprintf(out, "  Buffer:        %v (%s)\n", cfg.Buffer.Enabled, cfg.Buffer.Path)
+			fmt.Fprintf(out, "  Checkpoint:    %s\n", config.CheckpointPath(cfg))
 
 			return nil
 		},
 	}
+}
+
+func orDefault(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func versionCmd() *cobra.Command {
