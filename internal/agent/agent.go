@@ -299,7 +299,9 @@ func (a *Agent) cycle(ctx context.Context) {
 //
 // The checkpoint advances only when every chunk was accepted with
 // success=true and alerts_errors=0 (limit_reached still counts: those alerts
-// were refused by the organization's quota, not lost in transit). Otherwise
+// were refused by the organization's quota, not lost in transit; so do
+// alerts_rejected, which the platform will never accept however often they
+// are sent). Otherwise
 // the same window is collected again next cycle; the platform deduplicates
 // on externalId. Chunks that could not be delivered at all are also stored in
 // the buffer.
@@ -372,6 +374,7 @@ func acceptSyncResponse(resp *models.SyncResponse, chunk, chunks int) bool {
 		Int("alerts_duplicate", resp.AlertsDuplicate).
 		Int("alerts_skipped", resp.AlertsSkipped).
 		Int("alerts_errors", resp.AlertsErrors).
+		Int("alerts_rejected", resp.AlertsRejected).
 		Bool("limit_reached", resp.LimitReached).
 		Msg("sync response")
 
@@ -382,6 +385,11 @@ func acceptSyncResponse(resp *models.SyncResponse, chunk, chunks int) bool {
 		log.Warn().
 			Int("alerts_skipped", resp.AlertsSkipped).
 			Msg("organization alert limit reached: skipped alerts are not re-sent; raise the limit in the GRD platform")
+	}
+	if resp.AlertsRejected > 0 {
+		log.Warn().
+			Int("alerts_rejected", resp.AlertsRejected).
+			Msg("platform rejected invalid alerts; they are not re-sent (see the sync log in the GRD platform)")
 	}
 	return true
 }

@@ -216,6 +216,9 @@ func TestCollectAndSend_CheckpointAdvancesOnlyOnFullSuccess(t *testing.T) {
 		{"insert errors", func(_ int, p models.SyncPayload) (*models.SyncResponse, error) {
 			return &models.SyncResponse{Success: true, AlertsImported: len(p.Alerts) - 1, AlertsErrors: 1}, nil
 		}, false, 0},
+		{"permanently rejected alerts still advance", func(_ int, p models.SyncPayload) (*models.SyncResponse, error) {
+			return &models.SyncResponse{Success: true, AlertsImported: len(p.Alerts) - 1, AlertsRejected: 1}, nil
+		}, true, 0},
 		{"success false", func(int, models.SyncPayload) (*models.SyncResponse, error) {
 			return &models.SyncResponse{Success: false}, nil
 		}, false, 0},

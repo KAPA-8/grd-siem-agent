@@ -91,6 +91,49 @@ func TestMapHit_Golden(t *testing.T) {
 	}
 }
 
+// TestMapHit_PlatformParity pins the edge cases (dates, _id, _index, ttps)
+// shared with the platform's TypeScript mapper: both must produce exactly the
+// "expected" template, or drop the hit when it is null.
+func TestMapHit_PlatformParity(t *testing.T) {
+	data, err := os.ReadFile("testdata/stellar-alerts-parity-cases.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture struct {
+		Cases []struct {
+			Name     string          `json:"name"`
+			Hit      json.RawMessage `json:"hit"`
+			Expected map[string]any  `json:"expected"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(data, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if len(fixture.Cases) == 0 {
+		t.Fatal("parity fixture has no cases")
+	}
+	for _, c := range fixture.Cases {
+		t.Run(c.Name, func(t *testing.T) {
+			template, _, err := MapHit(decodeHit(t, string(c.Hit)), nil)
+			if c.Expected == nil {
+				if err == nil {
+					t.Fatalf("expected the hit to be dropped, got %+v", template)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("MapHit: %v", err)
+			}
+			got := roundTrip(t, template)
+			if !reflect.DeepEqual(got, roundTrip(t, c.Expected)) {
+				gotJSON, _ := json.MarshalIndent(got, "", "  ")
+				wantJSON, _ := json.MarshalIndent(c.Expected, "", "  ")
+				t.Errorf("template differs\n got: %s\nwant: %s", gotJSON, wantJSON)
+			}
+		})
+	}
+}
+
 func TestMapHit_EventTimeFallbackOrder(t *testing.T) {
 	tests := []struct {
 		name   string

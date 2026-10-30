@@ -28,7 +28,8 @@ type SyncResponse struct {
 	AlertsImported  int    `json:"alerts_imported"`
 	AlertsSkipped   int    `json:"alerts_skipped"`   // dropped by the organization's alert limit
 	AlertsDuplicate int    `json:"alerts_duplicate"` // already stored for this connection (same externalId)
-	AlertsErrors    int    `json:"alerts_errors"`
+	AlertsErrors    int    `json:"alerts_errors"`    // transient failures: the same window is sent again
+	AlertsRejected  int    `json:"alerts_rejected"`  // permanently invalid alerts: re-sending them changes nothing
 	LimitReached    bool   `json:"limit_reached"`
 	Message         string `json:"message,omitempty"`
 	Error           string `json:"error,omitempty"`
