@@ -153,7 +153,11 @@ var _ collector.Collector = (*Collector)(nil)
 // New creates a Stellar Cyber collector. SaaS always verifies the server
 // certificate; on-prem honours validate_ssl and ca_cert_file.
 func New(cfg config.SIEMConfig, syncCfg config.SyncConfig) (collector.Collector, error) {
-	return newCollector(cfg, syncCfg)
+	c, err := newCollector(cfg, syncCfg)
+	if err != nil {
+		return nil, err // an untyped nil, not a nil *Collector inside the interface
+	}
+	return c, nil
 }
 
 func newCollector(cfg config.SIEMConfig, syncCfg config.SyncConfig) (*Collector, error) {

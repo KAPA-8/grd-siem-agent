@@ -215,6 +215,10 @@ func severityToQRadarMin(severity string) int {
 // init registers the QRadar collector in the collector registry.
 func init() {
 	collector.Register("qradar", func(cfg config.SIEMConfig, syncCfg config.SyncConfig) (collector.Collector, error) {
-		return NewCollector(cfg, syncCfg)
+		c, err := NewCollector(cfg, syncCfg)
+		if err != nil {
+			return nil, err // an untyped nil, not a nil *QRadarCollector inside the interface
+		}
+		return c, nil
 	}, nil)
 }

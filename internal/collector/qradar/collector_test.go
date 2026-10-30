@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/grd-platform/grd-siem-agent/internal/collector"
 	"github.com/grd-platform/grd-siem-agent/internal/config"
 )
 
@@ -98,5 +99,16 @@ func TestNewCollector_CAFileError(t *testing.T) {
 	}, config.SyncConfig{})
 	if err == nil || !strings.Contains(err.Error(), "ca_cert_file") {
 		t.Errorf("err = %v", err)
+	}
+}
+
+func TestRegisteredFactory_ErrorReturnsUntypedNil(t *testing.T) {
+	coll, err := collector.New(config.SIEMConfig{
+		Type:        "qradar",
+		APIURL:      "https://qradar.local",
+		Credentials: config.CredentialConfig{APIKey: "sec", ValidateSSL: true, CACertFile: "/nonexistent/ca.pem"},
+	}, config.SyncConfig{})
+	if err == nil || coll != nil {
+		t.Fatalf("collector.New = %#v, %v; want nil and an error", coll, err)
 	}
 }

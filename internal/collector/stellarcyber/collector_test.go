@@ -562,3 +562,18 @@ func TestRegisteredInCollectorRegistry(t *testing.T) {
 		t.Error("an invalid min_severity must fail")
 	}
 }
+
+// A failing factory must return an untyped nil Collector, not a nil
+// *Collector wrapped in the interface (which compares != nil).
+func TestNew_ErrorReturnsUntypedNil(t *testing.T) {
+	cfg := validStellarConfig()
+	cfg.Credentials.CACertFile = "/nonexistent/ca.pem"
+	coll, err := collector.New(cfg, config.SyncConfig{})
+	if err == nil || coll != nil {
+		t.Fatalf("collector.New = %#v, %v; want nil and an error", coll, err)
+	}
+	coll, err = New(cfg, config.SyncConfig{})
+	if err == nil || coll != nil {
+		t.Fatalf("New = %#v, %v; want nil and an error", coll, err)
+	}
+}
