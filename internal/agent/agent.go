@@ -288,10 +288,13 @@ func (a *Agent) refreshBuffered() {
 	a.status.SetBuffered(n)
 }
 
-// cycle delivers buffered batches first, then runs one collection.
+// cycle delivers buffered batches first, then runs one collection that skips
+// the alerts the drain just delivered: after an outage the buffered window is
+// collected again (the checkpoint did not advance), and posting it a second
+// time would only double the /sync traffic and the platform's sync logs.
 func (a *Agent) cycle(ctx context.Context) {
-	a.drainBuffer(ctx)
-	a.collectAndSend(ctx)
+	delivered := a.drainBuffer(ctx)
+	a.collectAndSend(ctx, delivered)
 }
 
 // collectAndSend performs one collection cycle and delivers the alerts in
@@ -309,7 +312,10 @@ func (a *Agent) cycle(ctx context.Context) {
 // the same window is collected again next cycle; the platform deduplicates
 // on externalId. Chunks that could not be delivered at all are also stored in
 // the buffer.
-func (a *Agent) collectAndSend(ctx context.Context) {
+//
+// delivered holds the external IDs the buffer drain got accepted earlier in
+// this cycle (nil outside a cycle); those alerts are not posted again.
+func (a *Agent) collectAndSend(ctx context.Context, delivered map[string]bool) {
 	log.Info().Msg("starting collection cycle")
 
 	before := a.checkpoint
@@ -325,6 +331,11 @@ func (a *Agent) collectAndSend(ctx context.Context) {
 	}
 	a.markSIEMChecked() // a successful collection is a health check
 	a.status.SetSIEM(nil)
+
+	batch, skipped := withoutDelivered(batch, delivered)
+	if skipped > 0 {
+		log.Info().Int("alerts", skipped).Msg("skipping alerts the buffer drain just delivered")
+	}
 
 	if len(batch.Templates) == 0 {
 		log.Info().Msg("no new alerts to send")
@@ -364,6 +375,27 @@ func (a *Agent) collectAndSend(ctx context.Context) {
 		return
 	}
 	a.advanceCheckpoint(batch.Checkpoint)
+}
+
+// withoutDelivered drops from batch the alerts the buffer drain delivered in
+// this cycle and reports how many it dropped. They are left out of the
+// fetched total too: the drained batch already reported them, so the sync
+// log of what is left counts only the new alerts. The batch's checkpoint is
+// kept: once what is left is delivered, the whole window was.
+func withoutDelivered(batch collector.Batch, delivered map[string]bool) (collector.Batch, int) {
+	if len(delivered) == 0 {
+		return batch, 0
+	}
+	kept := make([]models.AlertImportTemplate, 0, len(batch.Templates))
+	for _, t := range batch.Templates {
+		if !delivered[t.ExternalID] {
+			kept = append(kept, t)
+		}
+	}
+	skipped := len(batch.Templates) - len(kept)
+	batch.Templates = kept
+	batch.Fetched = max(batch.Fetched-skipped, 0)
+	return batch, skipped
 }
 
 // acceptSyncResponse logs the platform's answer and reports whether every
@@ -499,8 +531,12 @@ func (a *Agent) advanceCheckpoint(checkpoint string) {
 // connection, or a partial import) so it cannot block the batches behind it;
 // such a batch is dropped once it has been refused maxBufferedRejections times.
 // A delivered batch clears the delivery error reported to the heartbeat.
-func (a *Agent) drainBuffer(ctx context.Context) {
+//
+// It returns the external IDs of the current connection's alerts in the
+// batches the platform accepted without errors, for collectAndSend to skip.
+func (a *Agent) drainBuffer(ctx context.Context) map[string]bool {
 	var afterID int64
+	accepted := map[string]bool{}
 	delivered, kept, dropped := 0, 0, 0
 	defer func() {
 		if delivered > 0 || kept > 0 || dropped > 0 {
@@ -513,10 +549,10 @@ func (a *Agent) drainBuffer(ctx context.Context) {
 		batches, err := a.buf.Peek(afterID, drainPageSize)
 		if err != nil {
 			log.Error().Err(err).Msg("failed to read the buffer")
-			return
+			return accepted
 		}
 		if len(batches) == 0 {
-			return
+			return accepted
 		}
 		for _, b := range batches {
 			afterID = b.ID
@@ -528,7 +564,7 @@ func (a *Agent) drainBuffer(ctx context.Context) {
 					if ctx.Err() == nil {
 						a.status.SetDelivery(err)
 					}
-					return
+					return accepted
 				}
 			} else if !ok {
 				err = errors.New("the platform imported the batch only partially")
@@ -546,6 +582,23 @@ func (a *Agent) drainBuffer(ctx context.Context) {
 			}
 			a.status.SetDelivery(nil) // the platform is reachable again
 			delivered++
+			a.addAccepted(accepted, b.Payload)
+		}
+	}
+	return accepted
+}
+
+// addAccepted adds to accepted the external IDs of a delivered payload, when
+// it belongs to the current connection (the platform deduplicates per
+// connection, so a batch buffered for an older one says nothing about the
+// alerts of this one). Alerts without an external ID cannot be matched.
+func (a *Agent) addAccepted(accepted map[string]bool, payload models.SyncPayload) {
+	if payload.ConnectionID != "" && payload.ConnectionID != a.cfg.SIEM.ConnectionID {
+		return
+	}
+	for _, alert := range payload.Alerts {
+		if alert.ExternalID != "" {
+			accepted[alert.ExternalID] = true
 		}
 	}
 }

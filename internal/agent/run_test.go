@@ -140,7 +140,7 @@ func TestHeartbeatStatus_ReflectsCollectionAndDelivery(t *testing.T) {
 	}
 
 	coll.push(batchOf(1, "cp"), errors.New("401 from SIEM"))
-	a.collectAndSend(ctx)
+	a.collectAndSend(ctx, nil)
 	if r := a.heartbeatStatus(ctx); r.Status != health.StatusError {
 		t.Errorf("after a failed collection: %+v", r)
 	}
@@ -149,7 +149,7 @@ func TestHeartbeatStatus_ReflectsCollectionAndDelivery(t *testing.T) {
 	platform.respond = func(int, models.SyncPayload) (*models.SyncResponse, error) {
 		return nil, &transport.HTTPError{Op: "sync", StatusCode: 400, Body: "bad"}
 	}
-	a.collectAndSend(ctx)
+	a.collectAndSend(ctx, nil)
 	r := a.heartbeatStatus(ctx)
 	if r.Status != health.StatusDegraded || r.BufferedBatches != 1 {
 		t.Errorf("after a failed delivery: %+v", r)
@@ -158,7 +158,7 @@ func TestHeartbeatStatus_ReflectsCollectionAndDelivery(t *testing.T) {
 	platform.respond = nil
 	a.drainBuffer(ctx)
 	coll.push(batchOf(1, "cp-3"), nil)
-	a.collectAndSend(ctx)
+	a.collectAndSend(ctx, nil)
 	if r := a.heartbeatStatus(ctx); r.Status != health.StatusHealthy || r.BufferedBatches != 0 {
 		t.Errorf("after recovery: %+v", r)
 	}
@@ -269,7 +269,7 @@ func TestHeartbeatStatus_HealthCheckSkippedWhileCollecting(t *testing.T) {
 	a.healthEvery = 0 // always due
 
 	done := make(chan struct{})
-	go func() { a.collectAndSend(ctx); close(done) }()
+	go func() { a.collectAndSend(ctx, nil); close(done) }()
 	<-coll.started
 	if r := a.heartbeatStatus(ctx); r.Status != health.StatusHealthy {
 		t.Errorf("status while collecting = %+v", r)
@@ -307,7 +307,7 @@ func TestCollectAndSend_WaitsForARunningHealthCheck(t *testing.T) {
 	go func() { a.heartbeatStatus(ctx); close(hbDone) }()
 	<-coll.started
 	collectDone := make(chan struct{})
-	go func() { a.collectAndSend(ctx); close(collectDone) }()
+	go func() { a.collectAndSend(ctx, nil); close(collectDone) }()
 	time.Sleep(50 * time.Millisecond) // give Collect a chance to run if it could
 	if collects, _, _ := coll.counts(); collects != 0 {
 		t.Errorf("Collect ran during a health check (%d calls)", collects)

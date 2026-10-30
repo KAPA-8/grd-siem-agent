@@ -28,8 +28,10 @@ type Clock interface {
 	NewTimer() backoff.Timer
 }
 
-// SyncRetryConfig is the retry policy of POST /sync: 1s, 2s, 4s, ... up to
-// 30s between attempts, for at most 2 minutes.
+// SyncRetryConfig is the retry policy of POST /sync: about 1s, 2s, 4s, ... up
+// to 30s between attempts, for at most 2 minutes. Every wait is randomized by
+// ±50% (see WithRetryNotify), so the gaps actually range from 0.5s to 45s.
+// A permanent error (see IsPermanent) is not retried at all.
 //
 // The window is longer than syncTimeout (90s), so a request that timed out
 // is retried at least once, and it rides out a platform restart or a short
@@ -93,6 +95,9 @@ func WithRetryNotify(ctx context.Context, cfg RetryConfig, operationName string,
 	b.MaxInterval = cfg.MaxInterval
 	b.MaxElapsedTime = cfg.MaxElapsedTime
 	b.Multiplier = 2
+	// Each wait is the nominal interval ±50%, so agents that lost the
+	// platform at the same time do not retry in lockstep when it comes back.
+	b.RandomizationFactor = 0.5
 
 	var timer backoff.Timer // nil: backoff's system timer
 	if cfg.Clock != nil {

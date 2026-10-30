@@ -346,14 +346,18 @@ grd-siem-agent
 │   └── Stellar Cyber: alert index or cases, native MITRE ATT&CK data
 ├── Sender (HTTPS to GRD platform)
 │   ├── /api/v1/siem-agent/sync       → send alerts (batches of 500)
-│   │   └── Retried with backoff (1s, 2s, 4s ... up to 30s apart) for up
-│   │       to 2 minutes; each request times out after 90s. 4xx answers
-│   │       other than 408/429 are not retried
+│   │   └── Retried with backoff (about 1s, 2s, 4s ... up to 30s apart,
+│   │       each wait randomized by ±50%, so 0.5s to 45s) for up to 2
+│   │       minutes; each request times out after 90s. 4xx answers other
+│   │       than 408/429 (400, 401, 403, 404, 422 ...) are not retried: the
+│   │       batch goes to the buffer at once
 │   └── /api/v1/siem-agent/heartbeat  → health status
 ├── Buffer (SQLite, offline resilience)
 │   └── Stores the batches still undelivered when the retries run out (at
-│       most ~3.5 min after the first attempt) and keeps them until the
-│       platform accepts them; each cycle tries them again first. While the
+│       most ~3.5 min after the first attempt) or that got a non-retried
+│       4xx, and keeps them until the platform accepts them; each cycle
+│       tries them again first, and its collection then skips the alerts
+│       just delivered, so a window is not posted twice. While the
 │       platform is down, the window re-collected every cycle replaces its
 │       buffered copy instead of piling up. A batch the platform refuses 5
 │       times (e.g. its connection was deleted) is dropped, since the
@@ -373,13 +377,16 @@ grd-siem-agent
 ```
 SIEM (QRadar) ──poll──> Collector ──normalize──> Sender ──HTTPS──> GRD Platform
                                         │
-                          (still failing after 2 min of retries)
+                (still failing after 2 min of retries, or a 4xx
+                 other than 408/429, which is not retried)
                                         │
                                      Buffer (SQLite)
                                         │
                                    (next cycle)
                                         │
-                                     Drain ──retry──> GRD Platform
+                                     Drain ──resend──> GRD Platform
+                                        │
+                  (then collect, skipping the alerts just delivered)
 ```
 
 ### Directory Layout (Linux production)
@@ -608,7 +615,7 @@ sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent validate \
 | Agent shows **error** in the dashboard | The collector cannot reach or log into the SIEM | The heartbeat detail and the agent log show the cause; the agent keeps retrying |
 | QRadar `/system/about` returns 403 | API key lacks permission for that endpoint | Safe to ignore — the agent works via the offenses endpoint |
 | Agent not collecting alerts | Severity filter too strict | Lower `sync.filters.min_severity` (e.g., `"low"` or `"info"`) |
-| Agent shows **degraded** with `delivery to the platform failed` | `/sync` failed (5xx, 429, timeout or connection error). Shown from the first failed attempt | Check network/firewall/proxy to `platform.url`. After 2 minutes of retries the alerts are buffered and re-sent every cycle; the checkpoint does not advance until they are delivered |
+| Agent shows **degraded** with `delivery to the platform failed` | `/sync` failed (5xx, 408, 429, timeout or connection error; or another 4xx, which is not retried). Shown from the first failed attempt | Check network/firewall/proxy to `platform.url`. After 2 minutes of retries (waits of about 1s to 30s, randomized by ±50%), or at once for a non-retried 4xx, the alerts are buffered and re-sent at the start of every cycle; the checkpoint does not advance until they are delivered |
 | Buffer growing large | Platform unreachable | Check network/firewall to platform URL |
 | `platform keeps refusing a buffered batch; dropping it` | A batch stored during an outage was refused 5 times (e.g. its SIEM connection was deleted or re-created) | Nothing to do: the batch is dropped and the alerts of the current connection are collected again from the checkpoint |
 | Stellar Cyber `results are not sorted by write_time` | The alert search ignored `sort`, which incremental collection needs | Use `data_source: cases` and report the Stellar Cyber version |

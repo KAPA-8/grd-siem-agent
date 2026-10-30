@@ -209,3 +209,34 @@ func TestSyncRetryConfig_GivesUpWithinMinutes(t *testing.T) {
 		})
 	}
 }
+
+// The documented /sync timing (review P3): the n-th wait is the nominal
+// 1s, 2s, 4s ... capped at 30s, randomized by ±50%, so 0.5s to 45s; the last
+// attempt starts within the 2-minute window.
+func TestSyncRetryConfig_WaitsMatchTheDocumentedJitter(t *testing.T) {
+	cfg := SyncRetryConfig()
+	for run := 0; run < 50; run++ {
+		clock := newFakeClock()
+		cfg.Clock = clock
+		start := clock.Now()
+		var starts []time.Time
+		_ = WithRetry(context.Background(), cfg, "sync", func() error {
+			starts = append(starts, clock.Now())
+			return errors.New("connection refused")
+		})
+		nominal := cfg.InitialInterval
+		for i := 1; i < len(starts); i++ {
+			gap := starts[i].Sub(starts[i-1])
+			if gap < nominal/2 || gap > nominal*3/2 {
+				t.Fatalf("run %d: wait %d = %s, want %s ±50%%", run, i, gap, nominal)
+			}
+			if gap > 45*time.Second {
+				t.Fatalf("run %d: wait %d = %s, want at most 45s", run, i, gap)
+			}
+			nominal = min(nominal*2, cfg.MaxInterval)
+		}
+		if last := starts[len(starts)-1].Sub(start); last > cfg.MaxElapsedTime {
+			t.Fatalf("run %d: last attempt started after %s, want within %s", run, last, cfg.MaxElapsedTime)
+		}
+	}
+}

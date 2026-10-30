@@ -291,7 +291,7 @@ func TestCollectAndSend_CheckpointAdvancesOnlyOnFullSuccess(t *testing.T) {
 			a := newTestAgent(t, coll, platform, nil)
 			a.checkpoint = "cp-1"
 
-			a.collectAndSend(context.Background())
+			a.collectAndSend(context.Background(), nil)
 
 			saved, ok := savedCheckpoint(t, a)
 			if tt.advanced {
@@ -324,7 +324,7 @@ func TestCollectAndSend_ClientErrorsAreNotRetried(t *testing.T) {
 				return nil, &transport.HTTPError{Op: "sync", StatusCode: tt.status, Body: "nope"}
 			}}
 			a := newTestAgent(t, coll, platform, nil)
-			a.collectAndSend(context.Background())
+			a.collectAndSend(context.Background(), nil)
 
 			calls := len(platform.sent())
 			if tt.permanent && calls != 1 {
@@ -349,7 +349,7 @@ func TestCollectAndSend_ChunksOf500WithExactCounts(t *testing.T) {
 	platform := &fakePlatform{}
 	a := newTestAgent(t, coll, platform, nil)
 
-	a.collectAndSend(context.Background())
+	a.collectAndSend(context.Background(), nil)
 
 	sent := platform.sent()
 	if len(sent) != 3 {
@@ -405,7 +405,7 @@ func TestCollectAndSend_MetadataDatesAreTheWindow(t *testing.T) {
 	platform := &fakePlatform{}
 	a := newTestAgent(t, coll, platform, nil)
 
-	a.collectAndSend(context.Background())
+	a.collectAndSend(context.Background(), nil)
 
 	meta := platform.sent()[0].SyncMetadata
 	if meta.DateFrom != "2026-10-23T12:00:00Z" || meta.DateTo != "2026-10-30T11:58:00Z" {
@@ -421,7 +421,7 @@ func TestCollectAndSend_WindowFallbackToAlertDates(t *testing.T) {
 	coll.push(b, nil)
 	platform := &fakePlatform{}
 	a := newTestAgent(t, coll, platform, nil)
-	a.collectAndSend(context.Background())
+	a.collectAndSend(context.Background(), nil)
 
 	meta := platform.sent()[0].SyncMetadata
 	if meta.DateFrom != "2026-10-20T00:00:00Z" || meta.DateTo != "2026-10-29T23:59:59Z" {
@@ -443,7 +443,7 @@ func TestCollectAndSend_FailedChunkBuffersTheRestWithoutPilingUp(t *testing.T) {
 	a := newTestAgent(t, coll, platform, buf)
 	a.checkpoint = "cp-1"
 
-	a.collectAndSend(context.Background())
+	a.collectAndSend(context.Background(), nil)
 	batches, _ := buf.Peek(0, 10)
 	if len(batches) != 2 || len(batches[0].Payload.Alerts) != 500 || len(batches[1].Payload.Alerts) != 100 {
 		t.Fatalf("buffered %d batches, want chunks 2 and 3", len(batches))
@@ -455,7 +455,7 @@ func TestCollectAndSend_FailedChunkBuffersTheRestWithoutPilingUp(t *testing.T) {
 		t.Errorf("checkpoint advanced to %q", a.checkpoint)
 	}
 
-	a.collectAndSend(context.Background())
+	a.collectAndSend(context.Background(), nil)
 	if got := bufLen(t, buf); got != 3 {
 		// chunk 1 failed this time too, so chunks 1-3 are buffered; 2 and 3 replaced their older copies
 		t.Errorf("buffer holds %d batches, want 3", got)
@@ -494,7 +494,7 @@ func TestCollectAndSend_PlatformDownIsReportedAtOnceAndBufferedWithinMinutes(t *
 			a.checkpoint = "cp-1"
 
 			start := clock.Now()
-			a.collectAndSend(context.Background())
+			a.collectAndSend(context.Background(), nil)
 			elapsed := clock.Now().Sub(start)
 
 			if len(seen) == 0 {
@@ -537,7 +537,7 @@ func TestCollectAndSend_RetrySuccessClearsTheDeliveryError(t *testing.T) {
 	}}
 	a, _ = newOutageAgent(t, coll, platform, buffer.NewMemoryBuffer())
 
-	a.collectAndSend(context.Background())
+	a.collectAndSend(context.Background(), nil)
 
 	// chunk 1: fails, fails, succeeds; chunk 2: succeeds
 	want := []string{health.StatusHealthy, health.StatusDegraded, health.StatusDegraded, health.StatusHealthy}
@@ -567,7 +567,7 @@ func TestCollectAndSend_PartialChunkStaysReportedAfterALaterChunk(t *testing.T) 
 	}}
 	a, _ = newOutageAgent(t, coll, platform, buffer.NewMemoryBuffer())
 
-	a.collectAndSend(context.Background())
+	a.collectAndSend(context.Background(), nil)
 
 	if want := []string{health.StatusHealthy, health.StatusDegraded, health.StatusDegraded}; !reflect.DeepEqual(seen, want) {
 		t.Errorf("status seen by each POST = %v, want %v", seen, want)
@@ -580,8 +580,8 @@ func TestCollectAndSend_PartialChunkStaysReportedAfterALaterChunk(t *testing.T) 
 // With the short retry window an outage spans many cycles. Each one buffers
 // the re-collected window under the same keys (one copy per chunk, the newest
 // one); once the platform is back every buffered chunk is posted once, the
-// checkpoint advances and no alert is lost. (The re-collection right after the
-// drain repeats the drained alerts; the platform deduplicates on externalId.)
+// re-collection right after the drain posts only the alerts that arrived since
+// (not the drained ones again), the checkpoint advances and no alert is lost.
 func TestCycle_OutageBuffersOneCopyPerChunkAndRecoversWithoutLoss(t *testing.T) {
 	coll := &fakeCollector{}
 	sizes := []int{700, 710, 720} // the same window, growing while the platform is down
@@ -629,33 +629,15 @@ func TestCycle_OutageBuffersOneCopyPerChunkAndRecoversWithoutLoss(t *testing.T) 
 	before := len(platform.sent())
 	a.cycle(ctx)
 	recovery := platform.sent()[before:]
-	if len(recovery) != 4 {
-		t.Fatalf("recovery cycle posted %d chunks, want the 2 buffered ones and the 2 re-collected ones", len(recovery))
+	if len(recovery) != 3 {
+		t.Fatalf("recovery cycle posted %d chunks, want the 2 buffered ones and 1 with the alerts collected since", len(recovery))
 	}
-	drained := map[string]int{}
-	for _, p := range recovery[:2] {
-		for _, al := range p.Alerts {
-			drained[al.ExternalID]++
-		}
+	assertPostedOnce(t, recovery, templates("a", 730))
+	if got := len(recovery[0].Alerts) + len(recovery[1].Alerts); got != 720 {
+		t.Errorf("drain posted %d alerts, want the 720 of the newest buffered copy", got)
 	}
-	for id, n := range drained {
-		if n != 1 {
-			t.Errorf("buffered alert %s posted %d times by the drain", id, n)
-		}
-	}
-	if len(drained) != 720 {
-		t.Errorf("drain posted %d alerts, want the 720 of the newest buffered copy", len(drained))
-	}
-	delivered := map[string]bool{}
-	for _, p := range recovery {
-		for _, al := range p.Alerts {
-			delivered[al.ExternalID] = true
-		}
-	}
-	for _, id := range externalIDsOf(templates("a", 730)) {
-		if !delivered[id] {
-			t.Errorf("alert %s was never delivered", id)
-		}
+	if meta := recovery[2].SyncMetadata; len(recovery[2].Alerts) != 10 || meta.TotalFetched != 10 || meta.TotalAfterFilter != 10 {
+		t.Errorf("collection posted %d alerts with metadata %+v, want only the 10 new ones, counted once", len(recovery[2].Alerts), meta)
 	}
 	if saved, _ := savedCheckpoint(t, a); saved != "cp-2" {
 		t.Errorf("saved checkpoint = %q, want cp-2", saved)
@@ -671,6 +653,175 @@ func TestCycle_OutageBuffersOneCopyPerChunkAndRecoversWithoutLoss(t *testing.T) 
 	}
 }
 
+// assertPostedOnce checks that every alert of want was posted exactly once
+// in sent, and that nothing else was.
+func assertPostedOnce(t *testing.T, sent []models.SyncPayload, want []models.AlertImportTemplate) {
+	t.Helper()
+	posted := map[string]int{}
+	for _, p := range sent {
+		for _, al := range p.Alerts {
+			posted[al.ExternalID]++
+		}
+	}
+	var wrong []string
+	for _, id := range externalIDsOf(want) {
+		if posted[id] != 1 {
+			wrong = append(wrong, fmt.Sprintf("%s×%d", id, posted[id]))
+		}
+		delete(posted, id)
+	}
+	if len(wrong) > 0 {
+		t.Errorf("%d of %d alerts were not posted exactly once (first: %s)", len(wrong), len(want), wrong[0])
+	}
+	if len(posted) > 0 {
+		t.Errorf("%d unexpected alerts were posted", len(posted))
+	}
+}
+
+// Regression (review P2): an outage longer than the 2-minute retry window but
+// shorter than the old 30-minute one made the recovery cycle post every
+// buffered alert twice: once from the drain and once from the re-collection of
+// the window the checkpoint had not passed (4 POSTs and two sync logs for 700
+// alerts, where the old window posted 2). The re-collection now skips what the
+// drain delivered, so the window is posted once and the checkpoint advances.
+func TestCycle_RecoveryAfterAShortOutagePostsTheWindowOnce(t *testing.T) {
+	coll := &fakeCollector{}
+	coll.push(batchOf(700, "cp-2"), nil) // two chunks, collected during the outage
+	coll.push(batchOf(700, "cp-2"), nil) // the same window, collected again after it
+	var clock *fakeClock
+	var outageEnd time.Time
+	platform := &fakePlatform{respond: func(_ int, p models.SyncPayload) (*models.SyncResponse, error) {
+		if clock.Now().Before(outageEnd) {
+			return nil, errPlatformDown
+		}
+		return okResponse(p), nil
+	}}
+	buf := newSQLiteBuffer(t)
+	a, clock := newOutageAgent(t, coll, platform, buf)
+	outageEnd = clock.Now().Add(5 * time.Minute)
+	a.checkpoint = "cp-1"
+	ctx := context.Background()
+
+	start := clock.Now()
+	a.cycle(ctx)
+	if n := bufLen(t, buf); n != 2 || a.checkpoint != "cp-1" {
+		t.Fatalf("after the outage cycle: buffered %d chunks, checkpoint %q; want 2 and cp-1", n, a.checkpoint)
+	}
+
+	clock.Advance(start.Add(15 * time.Minute).Sub(clock.Now())) // the next tick of a 15-minute interval
+	before := len(platform.sent())
+	a.cycle(ctx)
+	recovery := platform.sent()[before:]
+
+	if len(recovery) != 2 {
+		t.Errorf("recovery cycle posted %d chunks, want the window's 2 chunks once", len(recovery))
+	}
+	assertPostedOnce(t, recovery, templates("a", 700))
+	if got := coll.checkpoints; !reflect.DeepEqual(got, []string{"cp-1", "cp-1"}) {
+		t.Errorf("collected from %v, want the window from cp-1 twice", got)
+	}
+	if saved, _ := savedCheckpoint(t, a); saved != "cp-2" || a.checkpoint != "cp-2" {
+		t.Errorf("checkpoint saved=%q memory=%q, want cp-2", saved, a.checkpoint)
+	}
+	if r := a.heartbeatStatus(ctx); r.Status != health.StatusHealthy || r.BufferedBatches != 0 {
+		t.Errorf("status after recovery = %+v", r)
+	}
+}
+
+// Only alerts the platform accepted without errors in the drain are skipped:
+// the alerts of a buffered batch it imported partially or refused, or of a
+// batch buffered for another connection, are posted by the collection.
+func TestCycle_CollectionSkipsOnlyWhatTheDrainGotAccepted(t *testing.T) {
+	tests := []struct {
+		name       string
+		connection string
+		drained    func(models.SyncPayload) (*models.SyncResponse, error)
+		wantPosted int // alerts posted by the collection
+	}{
+		{"accepted", testConnectionID, func(p models.SyncPayload) (*models.SyncResponse, error) {
+			return okResponse(p), nil
+		}, 0},
+		{"accepted with rejected or limit-skipped alerts", testConnectionID, func(p models.SyncPayload) (*models.SyncResponse, error) {
+			return &models.SyncResponse{Success: true, AlertsRejected: 1, AlertsSkipped: 1, LimitReached: true}, nil
+		}, 0},
+		{"imported partially", testConnectionID, func(p models.SyncPayload) (*models.SyncResponse, error) {
+			return &models.SyncResponse{Success: true, AlertsImported: len(p.Alerts) - 1, AlertsErrors: 1}, nil
+		}, 3},
+		{"refused", testConnectionID, func(models.SyncPayload) (*models.SyncResponse, error) {
+			return nil, &transport.HTTPError{Op: "sync", StatusCode: 422, Body: "invalid"}
+		}, 3},
+		{"another connection", "0b7f0d3c-1111-4a2b-8c3d-4e5f6a7b8c9d", func(p models.SyncPayload) (*models.SyncResponse, error) {
+			return okResponse(p), nil
+		}, 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			buf := buffer.NewMemoryBuffer()
+			if err := buf.Push(models.SyncPayload{ConnectionID: tt.connection, Alerts: templates("a", 3)}, "k"); err != nil {
+				t.Fatal(err)
+			}
+			coll := &fakeCollector{}
+			coll.push(batchOf(3, "cp-2"), nil)
+			platform := &fakePlatform{respond: func(call int, p models.SyncPayload) (*models.SyncResponse, error) {
+				if call == 0 {
+					return tt.drained(p)
+				}
+				return okResponse(p), nil
+			}}
+			a := newTestAgent(t, coll, platform, buf)
+			a.checkpoint = "cp-1"
+
+			a.cycle(context.Background())
+
+			posted := 0
+			for _, p := range platform.sent()[1:] {
+				posted += len(p.Alerts)
+			}
+			if posted != tt.wantPosted {
+				t.Errorf("collection posted %d alerts, want %d", posted, tt.wantPosted)
+			}
+			if a.checkpoint != "cp-2" {
+				t.Errorf("checkpoint = %q, want cp-2", a.checkpoint)
+			}
+		})
+	}
+}
+
+// When the platform fails again in the middle of the drain, the collection
+// skips the chunk that was accepted and posts the rest of the window.
+func TestCycle_InterruptedDrainSkipsOnlyTheDeliveredChunk(t *testing.T) {
+	buf := newSQLiteBuffer(t)
+	all := templates("a", 700)
+	for i, chunk := range [][]models.AlertImportTemplate{all[:500], all[500:]} {
+		if err := buf.Push(models.SyncPayload{ConnectionID: testConnectionID, Alerts: chunk}, bufferKey(testConnectionID, "cp-1", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	coll := &fakeCollector{}
+	coll.push(batchOf(700, "cp-2"), nil)
+	platform := &fakePlatform{respond: func(call int, p models.SyncPayload) (*models.SyncResponse, error) {
+		if call == 1 { // the drain's second chunk
+			return nil, errPlatformDown
+		}
+		return okResponse(p), nil
+	}}
+	a, _ := newOutageAgent(t, coll, platform, buf)
+	a.checkpoint = "cp-1"
+
+	a.cycle(context.Background())
+
+	sent := platform.sent()
+	if len(sent) != 3 {
+		t.Fatalf("POSTs = %d, want drained chunk 1, failed chunk 2 and the collection", len(sent))
+	}
+	if got, want := externalIDsOf(sent[2].Alerts), externalIDsOf(all[500:]); !reflect.DeepEqual(got, want) {
+		t.Errorf("collection posted %d alerts, want the 200 the drain did not deliver", len(got))
+	}
+	if saved, _ := savedCheckpoint(t, a); saved != "cp-2" {
+		t.Errorf("saved checkpoint = %q, want cp-2", saved)
+	}
+}
+
 func TestCollectAndSend_NothingNewStillPersistsAChangedCheckpoint(t *testing.T) {
 	coll := &fakeCollector{}
 	coll.push(collector.Batch{Checkpoint: "normalized"}, nil)
@@ -678,7 +829,7 @@ func TestCollectAndSend_NothingNewStillPersistsAChangedCheckpoint(t *testing.T) 
 	a := newTestAgent(t, coll, platform, nil)
 	a.checkpoint = "foreign"
 
-	a.collectAndSend(context.Background())
+	a.collectAndSend(context.Background(), nil)
 
 	if saved, _ := savedCheckpoint(t, a); saved != "normalized" || len(platform.sent()) != 0 {
 		t.Errorf("saved=%q posts=%d", saved, len(platform.sent()))
@@ -692,7 +843,7 @@ func TestCollectAndSend_CollectErrorKeepsCheckpoint(t *testing.T) {
 	a := newTestAgent(t, coll, platform, nil)
 	a.checkpoint = "cp-1"
 
-	a.collectAndSend(context.Background())
+	a.collectAndSend(context.Background(), nil)
 
 	if a.checkpoint != "cp-1" || len(platform.sent()) != 0 {
 		t.Errorf("checkpoint=%q posts=%d", a.checkpoint, len(platform.sent()))
