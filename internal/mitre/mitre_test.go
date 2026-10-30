@@ -81,3 +81,51 @@ func TestExtract_SpanishKeywords(t *testing.T) {
 		}
 	}
 }
+
+// Partial category matching used to range over a Go map, so the same offense
+// could map to T1203 on one run and T1204 on the next (B16).
+func TestExtract_Deterministic(t *testing.T) {
+	inputs := []struct {
+		description string
+		categories  []string
+	}{
+		{"generic offense", []string{"Malware Exploit Attempt"}},
+		{"generic offense", []string{"Suspicious Network Anomaly Scan"}},
+		{"generic offense", []string{"Custom DoS Data Loss Firewall Policy"}},
+		{"generic offense", []string{"unmatched", "Remote Lateral Movement C2"}},
+	}
+	for _, in := range inputs {
+		first := Extract(in.description, in.categories)
+		for i := 0; i < 1000; i++ {
+			if got := Extract(in.description, in.categories); got != first {
+				t.Fatalf("run %d for %v: got %+v, first run gave %+v", i, in.categories, got, first)
+			}
+		}
+	}
+}
+
+func TestExtract_PartialMatchPrefersMostSpecificKeyword(t *testing.T) {
+	tests := []struct {
+		category string
+		wantID   string
+	}{
+		{"Port Scan Detected", "T1046"},               // "Port Scan" before "Scan"
+		{"Possible Denial of Service flood", "T1498"}, // "Denial of Service" before "DoS"
+		{"Malware Exploit Attempt", "T1204"},          // same length: declaration order
+		{"Local Data Exfiltration Attempt", "T1041"},
+	}
+	for _, tt := range tests {
+		if got := Extract("generic offense", []string{tt.category}); got.TechniqueID != tt.wantID {
+			t.Errorf("category %q: TechniqueID = %q, want %q", tt.category, got.TechniqueID, tt.wantID)
+		}
+	}
+}
+
+func TestExtract_ExactMatchBeatsPartial(t *testing.T) {
+	// "Authentication Failure" is an exact category even though "Authentication"
+	// is a substring of it; the first category that matches exactly wins.
+	got := Extract("generic offense", []string{"Something Port Scan", "Authentication Failure"})
+	if got.TechniqueID != "T1110" {
+		t.Errorf("TechniqueID = %q, want T1110 (exact match)", got.TechniqueID)
+	}
+}
