@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
 	"github.com/rs/zerolog/log"
 
 	"github.com/grd-platform/grd-siem-agent/internal/buffer"
@@ -26,7 +27,16 @@ const (
 	maxAlertsPerPost = 500
 	// drainPageSize is how many buffered batches are read at a time.
 	drainPageSize = 10
+	// healthCheckInterval spaces out the collector health checks run for
+	// the heartbeat.
+	healthCheckInterval = 5 * time.Minute
+	// healthCheckTimeout bounds one health check.
+	healthCheckTimeout = 30 * time.Second
 )
+
+// defaultInitRetry retries collector Init until it succeeds: 5s, 10s, ...
+// up to 5 minutes between attempts, forever.
+var defaultInitRetry = transport.RetryConfig{InitialInterval: 5 * time.Second, MaxInterval: 5 * time.Minute}
 
 // PlatformClient is the part of the platform API the agent uses.
 type PlatformClient interface {
@@ -49,9 +59,15 @@ type Agent struct {
 	updater     backgroundTask
 	checkpoints *checkpointStore
 	retryCfg    transport.RetryConfig
+	initRetry   transport.RetryConfig
+	status      *health.Tracker
 
 	// checkpoint is the last checkpoint whose alerts were all delivered.
 	checkpoint string
+
+	healthMu        sync.Mutex
+	lastHealthCheck time.Time
+	healthEvery     time.Duration
 }
 
 // New creates a new Agent from configuration.
@@ -79,7 +95,7 @@ func New(cfg *config.Config, configPath string) (*Agent, error) {
 	}
 
 	a := newAgent(cfg, coll, sender, buf)
-	a.heartbeat = health.NewHeartbeatService(sender, cfg.Heartbeat, cfg.Agent.Hostname, 1)
+	a.heartbeat = health.NewHeartbeatService(sender, time.Duration(cfg.Heartbeat.IntervalSeconds)*time.Second, cfg.Agent.Hostname, 1, a.heartbeatStatus)
 	a.updater = updater.New(cfg.Update)
 	return a, nil
 }
@@ -95,11 +111,18 @@ func newAgent(cfg *config.Config, coll collector.Collector, sender PlatformClien
 			path:       config.CheckpointPath(cfg),
 			legacyPath: config.LegacyCheckpointPath(cfg),
 		},
-		retryCfg: transport.DefaultRetryConfig(),
+		retryCfg:    transport.DefaultRetryConfig(),
+		initRetry:   defaultInitRetry,
+		status:      &health.Tracker{},
+		healthEvery: healthCheckInterval,
 	}
 }
 
 // Run starts the agent's main loop. It blocks until the context is cancelled.
+//
+// The heartbeat starts first, so the platform sees the agent (in "error")
+// even while the SIEM is unreachable; collector Init is then retried with
+// backoff until it succeeds or the context is cancelled.
 func (a *Agent) Run(ctx context.Context) error {
 	log.Info().
 		Str("agent_id", a.cfg.Agent.ID).
@@ -109,18 +132,16 @@ func (a *Agent) Run(ctx context.Context) error {
 		Int("interval_minutes", a.cfg.Sync.IntervalMinutes).
 		Msg("starting agent")
 
-	// Initialize collector (validates SIEM connectivity)
-	if err := a.coll.Init(ctx); err != nil {
-		return fmt.Errorf("collector init: %w", err)
-	}
-	defer a.coll.Close()
-	defer a.buf.Close()
-
-	// Load checkpoint
-	a.checkpoint = a.checkpoints.Load()
-	log.Info().Str("checkpoint", a.checkpoint).Msg("loaded checkpoint")
-
+	ctx, cancel := context.WithCancel(ctx)
 	var wg sync.WaitGroup
+	defer func() {
+		cancel()
+		wg.Wait() // the heartbeat may be running a health check
+		a.coll.Close()
+		a.buf.Close()
+		log.Info().Msg("agent stopped")
+	}()
+
 	for _, task := range []backgroundTask{a.heartbeat, a.updater} {
 		if task == nil {
 			continue
@@ -132,11 +153,23 @@ func (a *Agent) Run(ctx context.Context) error {
 		}(task)
 	}
 
+	if err := a.initCollector(ctx); err != nil {
+		log.Info().Msg("shutting down before the collector was initialized")
+		return nil
+	}
+
+	// Load checkpoint
+	a.checkpoint = a.checkpoints.Load()
+	log.Info().Str("checkpoint", a.checkpoint).Msg("loaded checkpoint")
+
 	// Drain any buffered alerts from previous runs, then collect immediately.
 	a.cycle(ctx)
 
 	// Start polling loop
 	interval := time.Duration(a.cfg.Sync.IntervalMinutes) * time.Minute
+	if interval <= 0 {
+		interval = 15 * time.Minute
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -146,13 +179,85 @@ func (a *Agent) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			log.Info().Msg("shutting down gracefully, waiting for background tasks...")
-			wg.Wait()
-			log.Info().Msg("agent stopped")
 			return nil
 		case <-ticker.C:
 			a.cycle(ctx)
 		}
 	}
+}
+
+// initCollector calls Init until it succeeds, backing off between attempts.
+// It only fails when ctx is cancelled.
+func (a *Agent) initCollector(ctx context.Context) error {
+	b := backoff.NewExponentialBackOff()
+	b.InitialInterval = a.initRetry.InitialInterval
+	b.MaxInterval = a.initRetry.MaxInterval
+	b.MaxElapsedTime = 0 // never give up
+	b.Reset()
+
+	for attempt := 1; ; attempt++ {
+		err := a.coll.Init(ctx)
+		if err == nil {
+			// Init just probed the SIEM: the next health check can wait.
+			a.healthMu.Lock()
+			a.lastHealthCheck = time.Now()
+			a.healthMu.Unlock()
+			a.status.SetInit(nil)
+			if attempt > 1 {
+				log.Info().Int("attempts", attempt).Msg("collector initialized")
+			}
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		a.status.SetInit(err)
+		wait := b.NextBackOff()
+		log.Error().Err(err).Int("attempt", attempt).Dur("retry_in", wait).Msg("collector init failed; retrying")
+
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+// heartbeatStatus is the heartbeat's StatusFunc: it refreshes the buffer
+// depth, runs the collector health check every healthEvery, and reports.
+func (a *Agent) heartbeatStatus(ctx context.Context) health.Report {
+	if a.status.Initialized() {
+		a.healthMu.Lock()
+		due := a.lastHealthCheck.IsZero() || time.Since(a.lastHealthCheck) >= a.healthEvery
+		if due {
+			a.lastHealthCheck = time.Now()
+		}
+		a.healthMu.Unlock()
+		if due {
+			checkCtx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
+			err := a.coll.HealthCheck(checkCtx)
+			cancel()
+			if ctx.Err() == nil {
+				if err != nil {
+					log.Warn().Err(err).Msg("collector health check failed")
+				}
+				a.status.SetSIEM(err)
+			}
+		}
+	}
+	a.refreshBuffered()
+	return a.status.Report()
+}
+
+func (a *Agent) refreshBuffered() {
+	n, err := a.buf.Len()
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to read the buffer size")
+		return
+	}
+	a.status.SetBuffered(n)
 }
 
 // cycle delivers buffered batches first, then runs one collection.
@@ -176,18 +281,23 @@ func (a *Agent) collectAndSend(ctx context.Context) {
 	before := a.checkpoint
 	batch, err := a.coll.Collect(ctx, before)
 	if err != nil {
-		log.Error().Err(err).Msg("collection failed")
+		if ctx.Err() == nil {
+			log.Error().Err(err).Msg("collection failed")
+			a.status.SetSIEM(err)
+		}
 		return
 	}
+	a.status.SetSIEM(nil)
 
 	if len(batch.Templates) == 0 {
 		log.Info().Msg("no new alerts to send")
 		a.advanceCheckpoint(batch.Checkpoint) // nothing to deliver: trivially complete
+		a.status.SetDelivery(nil)
 		return
 	}
 
 	payloads := a.buildPayloads(batch)
-	delivered := true
+	var deliveryErr error
 	for i, payload := range payloads {
 		resp, err := a.sendWithRetry(ctx, payload)
 		if err != nil {
@@ -197,15 +307,19 @@ func (a *Agent) collectAndSend(ctx context.Context) {
 				Int("chunks", len(payloads)).
 				Msg("failed to send alerts, buffering the undelivered chunks")
 			a.bufferPayloads(payloads[i:], before, i)
-			delivered = false
+			a.refreshBuffered()
+			deliveryErr = err
 			break
 		}
 		if !acceptSyncResponse(resp, i+1, len(payloads)) {
-			delivered = false
+			deliveryErr = fmt.Errorf("platform imported chunk %d/%d only partially (success=%v, alerts_errors=%d)", i+1, len(payloads), resp.Success, resp.AlertsErrors)
 		}
 	}
 
-	if !delivered {
+	if ctx.Err() == nil {
+		a.status.SetDelivery(deliveryErr)
+	}
+	if deliveryErr != nil {
 		log.Warn().Msg("checkpoint not advanced; the same alerts will be collected again next cycle")
 		return
 	}
@@ -337,6 +451,7 @@ func (a *Agent) drainBuffer(ctx context.Context) {
 		if delivered > 0 || kept > 0 {
 			log.Info().Int("delivered", delivered).Int("kept", kept).Msg("buffer drain finished")
 		}
+		a.refreshBuffered()
 	}()
 
 	for ctx.Err() == nil {
@@ -359,6 +474,9 @@ func (a *Agent) drainBuffer(ctx context.Context) {
 					continue
 				}
 				log.Warn().Err(err).Msg("buffer drain interrupted; batches stay buffered")
+				if ctx.Err() == nil {
+					a.status.SetDelivery(err)
+				}
 				return
 			}
 			if !ok {
