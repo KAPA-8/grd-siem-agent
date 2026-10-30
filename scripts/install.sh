@@ -226,6 +226,7 @@ chmod 755 "$INSTALL_DIR/grd-siem-agent"
 echo "       Installed to $INSTALL_DIR/grd-siem-agent"
 
 # Install update apply script
+UPDATE_SCRIPT_INSTALLED=false
 for candidate in \
     "./scripts/apply-update.sh" \
     "./apply-update.sh"; do
@@ -234,9 +235,14 @@ for candidate in \
         chmod 755 "$INSTALL_DIR/apply-update.sh"
         chown root:root "$INSTALL_DIR/apply-update.sh"
         echo "       Installed update script: $INSTALL_DIR/apply-update.sh"
+        UPDATE_SCRIPT_INSTALLED=true
         break
     fi
 done
+if [[ "$UPDATE_SCRIPT_INSTALLED" != true ]]; then
+    echo "       WARNING: apply-update.sh not found next to install.sh; staged updates will not be applied."
+    echo "                Run install.sh from the extracted release (or the repository root) to enable them."
+fi
 
 # Create update staging directory
 mkdir -p "$DATA_DIR/.update"
@@ -287,7 +293,8 @@ Wants=network-online.target
 Type=simple
 User=grd-agent
 Group=grd-agent
-ExecStartPre=+/opt/grd-siem-agent/apply-update.sh
+# "-": a missing apply-update.sh (manual install) must not stop the service (203/EXEC)
+ExecStartPre=-+/opt/grd-siem-agent/apply-update.sh
 ExecStart=/opt/grd-siem-agent/grd-siem-agent run --config /etc/grd-siem-agent/config.yaml
 Restart=on-failure
 RestartSec=10

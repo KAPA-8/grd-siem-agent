@@ -147,37 +147,3 @@ func TestSendHeartbeat_Success(t *testing.T) {
 		t.Fatalf("SendHeartbeat failed: %v", err)
 	}
 }
-
-func TestRegister_Success(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != pathRegister {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		if r.Header.Get("Authorization") != "Bearer org-api-key" {
-			t.Errorf("wrong auth: %s", r.Header.Get("Authorization"))
-		}
-
-		json.NewEncoder(w).Encode(models.RegisterResponse{
-			Success:    true,
-			AgentID:    "agent-uuid-123",
-			AgentToken: "grd_agent_abc123",
-		})
-	}))
-	defer server.Close()
-
-	resp, err := Register(context.Background(), server.URL, "org-api-key", models.RegisterRequest{
-		Name:         "Test Agent",
-		Hostname:     "test-host",
-		AgentVersion: "1.0.0",
-		SIEMType:     "qradar",
-	})
-	if err != nil {
-		t.Fatalf("Register failed: %v", err)
-	}
-	if resp.AgentID != "agent-uuid-123" {
-		t.Errorf("AgentID = %q, want agent-uuid-123", resp.AgentID)
-	}
-	if resp.AgentToken != "grd_agent_abc123" {
-		t.Errorf("AgentToken = %q, want grd_agent_abc123", resp.AgentToken)
-	}
-}

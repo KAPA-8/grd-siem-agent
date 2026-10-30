@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	// sendTimeout bounds heartbeat, config and register requests.
+	// sendTimeout bounds heartbeat and config requests.
 	sendTimeout = 30 * time.Second
 	// syncTimeout is longer than the platform's 60s maxDuration for the sync
 	// route, so the agent waits for the real outcome instead of retrying a
@@ -32,7 +32,6 @@ const (
 
 // API paths matching the platform's route structure.
 const (
-	pathRegister  = "/api/v1/siem-agent/register"
 	pathConfig    = "/api/v1/siem-agent/config"
 	pathHeartbeat = "/api/v1/siem-agent/heartbeat"
 	pathSync      = "/api/v1/siem-agent/sync"
@@ -67,44 +66,6 @@ func httpError(op string, status int, body []byte) error {
 		text = text[:maxErrorBodyBytes] + "..."
 	}
 	return &HTTPError{Op: op, StatusCode: status, Body: text}
-}
-
-// Register registers a new agent with the platform using the org API key.
-// Returns the agent_id and agent_token.
-func Register(ctx context.Context, platformURL, orgAPIKey string, req models.RegisterRequest) (*models.RegisterResponse, error) {
-	body, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling register request: %w", err)
-	}
-
-	url := platformURL + pathRegister
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+orgAPIKey)
-
-	client := &http.Client{Timeout: sendTimeout}
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("registration request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := readBody(resp)
-
-	if resp.StatusCode >= 400 {
-		return nil, httpError("registration", resp.StatusCode, respBody)
-	}
-
-	var result models.RegisterResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("decoding register response: %w", err)
-	}
-
-	return &result, nil
 }
 
 // FetchRemoteConfig gets the agent's configuration from the platform.
