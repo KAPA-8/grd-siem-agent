@@ -3,8 +3,10 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/grd-platform/grd-siem-agent/internal/config"
@@ -84,6 +86,41 @@ func TestSendSync_ServerError(t *testing.T) {
 	_, err := sender.SendSync(context.Background(), models.SyncPayload{})
 	if err == nil {
 		t.Fatal("expected error for 500 response")
+	}
+}
+
+func TestSendSync_ParsesDuplicatesAndTypedErrors(t *testing.T) {
+	status := http.StatusOK
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != pathSync {
+			t.Errorf("path = %s (trailing slash not trimmed?)", r.URL.Path)
+		}
+		w.WriteHeader(status)
+		if status != http.StatusOK {
+			w.Write([]byte(strings.Repeat("x", 10000)))
+			return
+		}
+		w.Write([]byte(`{"success":true,"sync_log_id":"s1","import_id":null,"alerts_imported":3,"alerts_skipped":0,"alerts_duplicate":2,"alerts_errors":0,"limit_reached":false,"new_field":1}`))
+	}))
+	defer server.Close()
+
+	sender := NewSender(config.PlatformConfig{URL: server.URL + "/", AgentToken: "t"})
+	resp, err := sender.SendSync(context.Background(), models.SyncPayload{ConnectionID: "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.AlertsImported != 3 || resp.AlertsDuplicate != 2 || resp.ImportID != "" || !resp.Success {
+		t.Errorf("resp = %+v", resp)
+	}
+
+	status = http.StatusNotFound
+	_, err = sender.SendSync(context.Background(), models.SyncPayload{ConnectionID: "c"})
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != 404 || !IsPermanent(err) {
+		t.Fatalf("err = %v, want a permanent *HTTPError 404", err)
+	}
+	if len(httpErr.Body) > maxErrorBodyBytes+3 {
+		t.Errorf("error body not bounded: %d bytes", len(httpErr.Body))
 	}
 }
 

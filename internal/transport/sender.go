@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog/log"
@@ -16,7 +17,18 @@ import (
 	"github.com/grd-platform/grd-siem-agent/internal/version"
 )
 
-const sendTimeout = 30 * time.Second
+const (
+	// sendTimeout bounds heartbeat, config and register requests.
+	sendTimeout = 30 * time.Second
+	// syncTimeout is longer than the platform's 60s maxDuration for the sync
+	// route, so the agent waits for the real outcome instead of retrying a
+	// request the server is still processing.
+	syncTimeout = 90 * time.Second
+	// maxResponseBytes bounds every platform response the agent reads.
+	maxResponseBytes = 1 << 20
+	// maxErrorBodyBytes bounds the error body kept in error messages.
+	maxErrorBodyBytes = 2 << 10
+)
 
 // API paths matching the platform's route structure.
 const (
@@ -34,14 +46,27 @@ type Sender struct {
 }
 
 // NewSender creates a new platform sender using the agent token.
+// Timeouts are applied per request (see sendTimeout and syncTimeout).
 func NewSender(platformCfg config.PlatformConfig) *Sender {
 	return &Sender{
-		platformURL: platformCfg.URL,
+		platformURL: strings.TrimRight(platformCfg.URL, "/"),
 		agentToken:  platformCfg.AgentToken,
-		httpClient: &http.Client{
-			Timeout: sendTimeout,
-		},
+		httpClient:  &http.Client{},
 	}
+}
+
+// readBody reads a bounded response body.
+func readBody(resp *http.Response) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+}
+
+// httpError builds an *HTTPError with a bounded body.
+func httpError(op string, status int, body []byte) error {
+	text := strings.TrimSpace(string(body))
+	if len(text) > maxErrorBodyBytes {
+		text = text[:maxErrorBodyBytes] + "..."
+	}
+	return &HTTPError{Op: op, StatusCode: status, Body: text}
 }
 
 // Register registers a new agent with the platform using the org API key.
@@ -68,10 +93,10 @@ func Register(ctx context.Context, platformURL, orgAPIKey string, req models.Reg
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := readBody(resp)
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("registration failed (%d): %s", resp.StatusCode, string(respBody))
+		return nil, httpError("registration", resp.StatusCode, respBody)
 	}
 
 	var result models.RegisterResponse
@@ -84,6 +109,9 @@ func Register(ctx context.Context, platformURL, orgAPIKey string, req models.Reg
 
 // FetchRemoteConfig gets the agent's configuration from the platform.
 func (s *Sender) FetchRemoteConfig(ctx context.Context) (*models.RemoteConfig, error) {
+	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+
 	url := s.platformURL + pathConfig
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -98,10 +126,10 @@ func (s *Sender) FetchRemoteConfig(ctx context.Context) (*models.RemoteConfig, e
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, _ := readBody(resp)
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("fetch config failed (%d): %s", resp.StatusCode, string(respBody))
+		return nil, httpError("fetch config", resp.StatusCode, respBody)
 	}
 
 	var cfg models.RemoteConfig
@@ -112,8 +140,12 @@ func (s *Sender) FetchRemoteConfig(ctx context.Context) (*models.RemoteConfig, e
 	return &cfg, nil
 }
 
-// SendSync sends a batch of alerts to the platform.
+// SendSync sends a batch of alerts to the platform. A non-2xx answer is
+// returned as *HTTPError (see IsPermanent).
 func (s *Sender) SendSync(ctx context.Context, payload models.SyncPayload) (*models.SyncResponse, error) {
+	ctx, cancel := context.WithTimeout(ctx, syncTimeout)
+	defer cancel()
+
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return nil, fmt.Errorf("marshaling sync payload: %w", err)
@@ -134,10 +166,13 @@ func (s *Sender) SendSync(ctx context.Context, payload models.SyncPayload) (*mod
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
+	respBody, err := readBody(resp)
+	if err != nil {
+		return nil, fmt.Errorf("reading sync response: %w", err)
+	}
 
-	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("sync failed (%d): %s", resp.StatusCode, string(respBody))
+	if resp.StatusCode >= 300 {
+		return nil, httpError("sync", resp.StatusCode, respBody)
 	}
 
 	var result models.SyncResponse
@@ -146,8 +181,11 @@ func (s *Sender) SendSync(ctx context.Context, payload models.SyncPayload) (*mod
 	}
 
 	log.Debug().
+		Bool("success", result.Success).
 		Int("alerts_imported", result.AlertsImported).
+		Int("alerts_duplicate", result.AlertsDuplicate).
 		Int("alerts_skipped", result.AlertsSkipped).
+		Int("alerts_errors", result.AlertsErrors).
 		Bool("limit_reached", result.LimitReached).
 		Msg("sync response received")
 
@@ -156,6 +194,9 @@ func (s *Sender) SendSync(ctx context.Context, payload models.SyncPayload) (*mod
 
 // SendHeartbeat sends a heartbeat to the platform.
 func (s *Sender) SendHeartbeat(ctx context.Context, hb models.HeartbeatPayload) error {
+	ctx, cancel := context.WithTimeout(ctx, sendTimeout)
+	defer cancel()
+
 	body, err := json.Marshal(hb)
 	if err != nil {
 		return fmt.Errorf("marshaling heartbeat: %w", err)
@@ -176,9 +217,9 @@ func (s *Sender) SendHeartbeat(ctx context.Context, hb models.HeartbeatPayload) 
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode >= 400 {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("heartbeat failed (%d): %s", resp.StatusCode, string(respBody))
+	respBody, _ := readBody(resp)
+	if resp.StatusCode >= 300 {
+		return httpError("heartbeat", resp.StatusCode, respBody)
 	}
 
 	log.Debug().Int("status", resp.StatusCode).Msg("heartbeat sent")

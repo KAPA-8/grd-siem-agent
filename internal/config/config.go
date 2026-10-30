@@ -153,14 +153,47 @@ func LoadMinimal(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// CheckpointPath returns the path to the checkpoint file.
-// It uses the buffer directory (writable by grd-agent) instead of the config
-// directory (which is typically read-only /etc/grd-siem-agent/).
+// checkpointFilePrefix is the checkpoint file name; the per-connection file
+// appends "-<connection_id>".
+const checkpointFilePrefix = ".grd-agent-checkpoint"
+
+// CheckpointPath returns the checkpoint file for the configured connection:
+// <buffer dir>/.grd-agent-checkpoint-<connection_id>. It lives next to the
+// buffer (writable by grd-agent) instead of the config directory (typically
+// read-only /etc/grd-siem-agent/). One file per connection means a changed
+// connection never resumes from another connection's checkpoint.
 func CheckpointPath(cfg *Config) string {
+	return filepath.Join(checkpointDir(cfg), checkpointFilePrefix+"-"+safeFileName(cfg.SIEM.ConnectionID))
+}
+
+// LegacyCheckpointPath is the single checkpoint file used by older agents.
+// It is read once when the per-connection file does not exist yet.
+func LegacyCheckpointPath(cfg *Config) string {
+	return filepath.Join(checkpointDir(cfg), checkpointFilePrefix)
+}
+
+func checkpointDir(cfg *Config) string {
 	if cfg.Buffer.Path != "" {
-		return filepath.Join(filepath.Dir(cfg.Buffer.Path), ".grd-agent-checkpoint")
+		return filepath.Dir(cfg.Buffer.Path)
 	}
-	return filepath.Join(os.TempDir(), ".grd-agent-checkpoint")
+	return os.TempDir()
+}
+
+// safeFileName keeps letters, digits, '-' and '_' (a UUID is unchanged).
+func safeFileName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "default"
+	}
+	return b.String()
 }
 
 // validate checks that all required fields are set for run mode.
