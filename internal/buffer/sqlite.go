@@ -18,7 +18,8 @@ import (
 //
 //	0/1: buffered_alerts(id, connection_id, alerts_json, alert_count, created_at)
 //	2:   + metadata_json (the batch's SyncMetadata) and dedupe_key
-const schemaVersion = 2
+//	3:   + rejections (how many times the platform refused the batch)
+const schemaVersion = 3
 
 // SQLiteBuffer implements Buffer using a local SQLite database.
 // Uses modernc.org/sqlite (pure Go, no CGO) for cross-compilation.
@@ -76,8 +77,15 @@ func initSchema(db *sql.DB) error {
 	return migrate(db)
 }
 
-// migrate adds the metadata and dedupe key columns and backfills the
-// metadata of existing rows from their alerts, in one transaction.
+// addedColumns are the columns later schema versions added, in order.
+var addedColumns = []struct{ name, ddl string }{
+	{"metadata_json", "metadata_json TEXT"},
+	{"dedupe_key", "dedupe_key TEXT"},
+	{"rejections", "rejections INTEGER NOT NULL DEFAULT 0"},
+}
+
+// migrate adds the missing columns and backfills the metadata of existing
+// rows from their alerts, in one transaction.
 func migrate(db *sql.DB) error {
 	tx, err := db.Begin()
 	if err != nil {
@@ -89,10 +97,10 @@ func migrate(db *sql.DB) error {
 	if err != nil {
 		return err
 	}
-	for _, col := range []string{"metadata_json", "dedupe_key"} {
-		if !columns[col] {
-			if _, err := tx.Exec("ALTER TABLE buffered_alerts ADD COLUMN " + col + " TEXT"); err != nil {
-				return fmt.Errorf("adding column %s: %w", col, err)
+	for _, col := range addedColumns {
+		if !columns[col.name] {
+			if _, err := tx.Exec("ALTER TABLE buffered_alerts ADD COLUMN " + col.ddl); err != nil {
+				return fmt.Errorf("adding column %s: %w", col.name, err)
 			}
 		}
 	}
@@ -240,7 +248,7 @@ func (b *SQLiteBuffer) Push(payload models.SyncPayload, key string) error {
 // Rows whose alerts cannot be decoded can never be delivered and are removed.
 func (b *SQLiteBuffer) Peek(afterID int64, limit int) ([]BufferedBatch, error) {
 	rows, err := b.db.Query(
-		`SELECT id, connection_id, alerts_json, metadata_json, dedupe_key, created_at
+		`SELECT id, connection_id, alerts_json, metadata_json, dedupe_key, created_at, rejections
 		   FROM buffered_alerts WHERE id > ? ORDER BY id ASC LIMIT ?`,
 		afterID, limit,
 	)
@@ -256,8 +264,9 @@ func (b *SQLiteBuffer) Peek(afterID int64, limit int) ([]BufferedBatch, error) {
 			connectionID, alerts string
 			metaJSON, dedupeKey  sql.NullString
 			createdAt            sql.NullString
+			rejections           int
 		)
-		if err := rows.Scan(&id, &connectionID, &alerts, &metaJSON, &dedupeKey, &createdAt); err != nil {
+		if err := rows.Scan(&id, &connectionID, &alerts, &metaJSON, &dedupeKey, &createdAt, &rejections); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scanning buffer row: %w", err)
 		}
@@ -279,6 +288,7 @@ func (b *SQLiteBuffer) Peek(afterID int64, limit int) ([]BufferedBatch, error) {
 				Alerts:       decoded,
 				SyncMetadata: meta,
 			},
+			Rejections: rejections,
 		})
 	}
 	iterErr := rows.Err()
@@ -299,6 +309,14 @@ func (b *SQLiteBuffer) Peek(afterID int64, limit int) ([]BufferedBatch, error) {
 func (b *SQLiteBuffer) Ack(id int64) error {
 	if _, err := b.db.Exec("DELETE FROM buffered_alerts WHERE id = ?", id); err != nil {
 		return fmt.Errorf("deleting buffer entry %d: %w", id, err)
+	}
+	return nil
+}
+
+// Reject increments a batch's rejection count (a single, atomic UPDATE).
+func (b *SQLiteBuffer) Reject(id int64) error {
+	if _, err := b.db.Exec("UPDATE buffered_alerts SET rejections = rejections + 1 WHERE id = ?", id); err != nil {
+		return fmt.Errorf("recording rejection of buffer entry %d: %w", id, err)
 	}
 	return nil
 }

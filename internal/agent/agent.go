@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -32,6 +33,13 @@ const (
 	healthCheckInterval = 5 * time.Minute
 	// healthCheckTimeout bounds one health check.
 	healthCheckTimeout = 30 * time.Second
+	// maxBufferedRejections is how many times the platform may refuse a
+	// buffered batch (a permanent 4xx other than 401/403, e.g. its connection
+	// was deleted, or a partial import) before the batch is dropped, so it is
+	// not re-sent forever and the heartbeat does not stay degraded. Buffered
+	// alerts are a safety net: the checkpoint never advances past alerts
+	// that were not delivered, so their window is collected again.
+	maxBufferedRejections = 5
 )
 
 // defaultInitRetry retries collector Init until it succeeds: 5s, 10s, ...
@@ -65,8 +73,15 @@ type Agent struct {
 	// checkpoint is the last checkpoint whose alerts were all delivered.
 	checkpoint string
 
+	// siemMu serializes the collector's SIEM requests: Collect (main loop)
+	// and HealthCheck (heartbeat goroutine) never run at the same time.
+	// Stellar Cyber asks for sequential requests, and a health check queued
+	// behind a collection's token exchange would time out and report the
+	// SIEM as down.
+	siemMu sync.Mutex
+
 	healthMu        sync.Mutex
-	lastHealthCheck time.Time
+	lastHealthCheck time.Time // last Init, successful Collect or health check
 	healthEvery     time.Duration
 }
 
@@ -198,10 +213,7 @@ func (a *Agent) initCollector(ctx context.Context) error {
 	for attempt := 1; ; attempt++ {
 		err := a.coll.Init(ctx)
 		if err == nil {
-			// Init just probed the SIEM: the next health check can wait.
-			a.healthMu.Lock()
-			a.lastHealthCheck = time.Now()
-			a.healthMu.Unlock()
+			a.markSIEMChecked() // Init just probed the SIEM: the next health check can wait
 			a.status.SetInit(nil)
 			if attempt > 1 {
 				log.Info().Int("attempts", attempt).Msg("collector initialized")
@@ -226,29 +238,45 @@ func (a *Agent) initCollector(ctx context.Context) error {
 }
 
 // heartbeatStatus is the heartbeat's StatusFunc: it refreshes the buffer
-// depth, runs the collector health check every healthEvery, and reports.
+// depth, runs the collector health check when one is due, and reports.
 func (a *Agent) heartbeatStatus(ctx context.Context) health.Report {
 	if a.status.Initialized() {
-		a.healthMu.Lock()
-		due := a.lastHealthCheck.IsZero() || time.Since(a.lastHealthCheck) >= a.healthEvery
-		if due {
-			a.lastHealthCheck = time.Now()
-		}
-		a.healthMu.Unlock()
-		if due {
-			checkCtx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
-			err := a.coll.HealthCheck(checkCtx)
-			cancel()
-			if ctx.Err() == nil {
-				if err != nil {
-					log.Warn().Err(err).Msg("collector health check failed")
-				}
-				a.status.SetSIEM(err)
-			}
-		}
+		a.maybeHealthCheck(ctx)
 	}
 	a.refreshBuffered()
 	return a.status.Report()
+}
+
+// markSIEMChecked records that the SIEM just answered (Init, a successful
+// collection or a health check), which postpones the next health check.
+func (a *Agent) markSIEMChecked() {
+	a.healthMu.Lock()
+	a.lastHealthCheck = time.Now()
+	a.healthMu.Unlock()
+}
+
+// maybeHealthCheck runs the collector health check when the SIEM has not been
+// checked for healthEvery. It is skipped while a collection is running: the
+// collection talks to the SIEM and reports its state itself.
+func (a *Agent) maybeHealthCheck(ctx context.Context) {
+	a.healthMu.Lock()
+	due := a.lastHealthCheck.IsZero() || time.Since(a.lastHealthCheck) >= a.healthEvery
+	a.healthMu.Unlock()
+	if !due || !a.siemMu.TryLock() {
+		return
+	}
+	defer a.siemMu.Unlock()
+	a.markSIEMChecked()
+
+	checkCtx, cancel := context.WithTimeout(ctx, healthCheckTimeout)
+	err := a.coll.HealthCheck(checkCtx)
+	cancel()
+	if ctx.Err() == nil {
+		if err != nil {
+			log.Warn().Err(err).Msg("collector health check failed")
+		}
+		a.status.SetSIEM(err)
+	}
 }
 
 func (a *Agent) refreshBuffered() {
@@ -279,7 +307,9 @@ func (a *Agent) collectAndSend(ctx context.Context) {
 	log.Info().Msg("starting collection cycle")
 
 	before := a.checkpoint
+	a.siemMu.Lock()
 	batch, err := a.coll.Collect(ctx, before)
+	a.siemMu.Unlock()
 	if err != nil {
 		if ctx.Err() == nil {
 			log.Error().Err(err).Msg("collection failed")
@@ -287,6 +317,7 @@ func (a *Agent) collectAndSend(ctx context.Context) {
 		}
 		return
 	}
+	a.markSIEMChecked() // a successful collection is a health check
 	a.status.SetSIEM(nil)
 
 	if len(batch.Templates) == 0 {
@@ -440,16 +471,17 @@ func (a *Agent) advanceCheckpoint(checkpoint string) {
 }
 
 // drainBuffer sends buffered batches oldest first. A batch is removed (Ack)
-// only after every chunk of it was accepted without errors; everything else
-// stays buffered. Draining stops when the platform is unreachable, and skips
-// past a batch the platform rejects permanently (e.g. its connection was
-// deleted) so it cannot block the batches behind it.
+// only after every chunk of it was accepted without errors. Draining stops
+// when the platform is unreachable (the batches stay buffered), and skips
+// past a batch the platform refuses (a permanent 4xx such as a deleted
+// connection, or a partial import) so it cannot block the batches behind it;
+// such a batch is dropped once it has been refused maxBufferedRejections times.
 func (a *Agent) drainBuffer(ctx context.Context) {
 	var afterID int64
-	delivered, kept := 0, 0
+	delivered, kept, dropped := 0, 0, 0
 	defer func() {
-		if delivered > 0 || kept > 0 {
-			log.Info().Int("delivered", delivered).Int("kept", kept).Msg("buffer drain finished")
+		if delivered > 0 || kept > 0 || dropped > 0 {
+			log.Info().Int("delivered", delivered).Int("kept", kept).Int("dropped", dropped).Msg("buffer drain finished")
 		}
 		a.refreshBuffered()
 	}()
@@ -468,19 +500,22 @@ func (a *Agent) drainBuffer(ctx context.Context) {
 			ok, err := a.deliverBuffered(ctx, b.Payload)
 			if err != nil {
 				code := transport.StatusCode(err)
-				if transport.IsPermanent(err) && code != 401 && code != 403 {
-					log.Error().Err(err).Int64("batch", b.ID).Msg("platform rejected a buffered batch; keeping it")
-					kept++
-					continue
+				if !transport.IsPermanent(err) || code == 401 || code == 403 {
+					log.Warn().Err(err).Msg("buffer drain interrupted; batches stay buffered")
+					if ctx.Err() == nil {
+						a.status.SetDelivery(err)
+					}
+					return
 				}
-				log.Warn().Err(err).Msg("buffer drain interrupted; batches stay buffered")
-				if ctx.Err() == nil {
-					a.status.SetDelivery(err)
-				}
-				return
+			} else if !ok {
+				err = errors.New("the platform imported the batch only partially")
 			}
-			if !ok {
-				kept++
+			if err != nil {
+				if a.rejectBuffered(b, err) {
+					dropped++
+				} else {
+					kept++
+				}
 				continue
 			}
 			if err := a.buf.Ack(b.ID); err != nil {
@@ -489,6 +524,37 @@ func (a *Agent) drainBuffer(ctx context.Context) {
 			delivered++
 		}
 	}
+}
+
+// rejectBuffered records one refusal of a buffered batch and drops the batch
+// once it has been refused maxBufferedRejections times. It reports whether
+// the batch was dropped.
+func (a *Agent) rejectBuffered(b buffer.BufferedBatch, reason error) bool {
+	rejections := b.Rejections + 1
+	if rejections >= maxBufferedRejections {
+		log.Error().
+			Err(reason).
+			Int64("batch", b.ID).
+			Int("rejections", rejections).
+			Int("alerts", len(b.Payload.Alerts)).
+			Str("connection_id", b.Payload.ConnectionID).
+			Msg("platform keeps refusing a buffered batch; dropping it")
+		if err := a.buf.Ack(b.ID); err != nil {
+			log.Error().Err(err).Int64("batch", b.ID).Msg("failed to drop a refused batch")
+			return false
+		}
+		return true
+	}
+	log.Error().
+		Err(reason).
+		Int64("batch", b.ID).
+		Int("rejections", rejections).
+		Int("max_rejections", maxBufferedRejections).
+		Msg("platform refused a buffered batch; keeping it for now")
+	if err := a.buf.Reject(b.ID); err != nil {
+		log.Error().Err(err).Int64("batch", b.ID).Msg("failed to record the refusal of a buffered batch")
+	}
+	return false
 }
 
 // deliverBuffered sends one buffered payload (split into chunks when an old

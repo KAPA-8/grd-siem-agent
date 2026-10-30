@@ -10,8 +10,9 @@ import (
 // Collector defines the interface that all SIEM collectors must implement.
 // Each SIEM type (QRadar, Stellar Cyber, ...) provides its own implementation.
 //
-// HealthCheck may run concurrently with Collect (the heartbeat calls it from
-// its own goroutine), so implementations must be safe for that.
+// The agent calls Collect from its main loop and HealthCheck from the
+// heartbeat goroutine, but never both at once: the SIEM sees one request at a
+// time, and a health check is skipped while a collection is running.
 type Collector interface {
 	// Name returns the unique identifier for this collector type (e.g., "qradar").
 	Name() string

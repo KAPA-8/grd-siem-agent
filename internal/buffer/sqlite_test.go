@@ -134,6 +134,106 @@ func TestBuffer_PushWithKeyReplaces(t *testing.T) {
 }
 
 // A crash (or os.Exit) between Peek and Ack must not lose the batch.
+func TestBuffer_RejectCountsRefusals(t *testing.T) {
+	implementations(t, func(t *testing.T, buf Buffer) {
+		for _, d := range []string{"refused", "fine"} {
+			if err := buf.Push(payload("c", d), ""); err != nil {
+				t.Fatal(err)
+			}
+		}
+		batches, _ := buf.Peek(0, 10)
+		for i := 0; i < 2; i++ {
+			if err := buf.Reject(batches[0].ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := buf.Reject(9999); err != nil {
+			t.Errorf("rejecting an unknown id must be a no-op: %v", err)
+		}
+		batches, _ = buf.Peek(0, 10)
+		if len(batches) != 2 || batches[0].Rejections != 2 || batches[1].Rejections != 0 {
+			t.Errorf("rejections = %+v, want [2 0] and nothing removed", batches)
+		}
+	})
+}
+
+// The rejection count survives a restart.
+func TestSQLiteBuffer_RejectionsPersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "buffer.db")
+	buf, err := NewSQLiteBuffer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := buf.Push(payload("c", "refused"), ""); err != nil {
+		t.Fatal(err)
+	}
+	batches, _ := buf.Peek(0, 1)
+	if err := buf.Reject(batches[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	buf.Close()
+
+	buf, err = NewSQLiteBuffer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buf.Close()
+	if batches, _ = buf.Peek(0, 1); len(batches) != 1 || batches[0].Rejections != 1 {
+		t.Errorf("after reopen = %+v, want one batch refused once", batches)
+	}
+}
+
+// A schema-2 buffer (written by the previous version of this agent) gains
+// the rejections column; its rows start at 0.
+func TestSQLiteBuffer_MigratesSchema2(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v2.db")
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE buffered_alerts (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			connection_id TEXT NOT NULL,
+			alerts_json TEXT NOT NULL,
+			alert_count INTEGER NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			metadata_json TEXT,
+			dedupe_key TEXT
+		)`,
+		`INSERT INTO buffered_alerts (connection_id, alerts_json, alert_count, metadata_json, dedupe_key) VALUES
+			('conn-1', '[{"techniqueId":"T1110","description":"a","alertDate":"2026-10-27","severity":"high"}]', 1,
+			 '{"date_from":"2026-10-23T12:00:00Z","date_to":"2026-10-30T11:58:00Z","total_fetched":1,"total_after_filter":1}', 'k1')`,
+		`PRAGMA user_version = 2`,
+	} {
+		if _, err := old.Exec(stmt); err != nil {
+			t.Fatalf("%s: %v", stmt, err)
+		}
+	}
+	old.Close()
+
+	buf, err := NewSQLiteBuffer(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buf.Close()
+	batches, err := buf.Peek(0, 10)
+	if err != nil || len(batches) != 1 || batches[0].Rejections != 0 || batches[0].Key != "k1" ||
+		batches[0].Payload.SyncMetadata.DateFrom != "2026-10-23T12:00:00Z" {
+		t.Fatalf("Peek = %+v, %v", batches, err)
+	}
+	if err := buf.Reject(batches[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if batches, _ = buf.Peek(0, 10); batches[0].Rejections != 1 {
+		t.Errorf("rejections = %d, want 1", batches[0].Rejections)
+	}
+	var version int
+	if err := buf.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 3 {
+		t.Errorf("user_version = %d, %v; want 3", version, err)
+	}
+}
+
 func TestSQLiteBuffer_CrashBetweenPeekAndAck(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "buffer.db")
 	buf, err := NewSQLiteBuffer(path)

@@ -16,7 +16,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -49,7 +48,8 @@ const (
 	alertsPageSize     = 500   // max size per _search request
 	maxResultWindow    = 10000 // from + size limit of the alert index
 	casesPageSize      = 100
-	caseAlertsPageSize = 50 // /cases/{id}/alerts limit
+	maxCasesLimit      = 500 // /cases limit
+	caseAlertsPageSize = 50  // /cases/{id}/alerts limit
 
 	defaultMaxAlerts    = 1000
 	defaultLookbackDays = 7
@@ -145,6 +145,7 @@ type Collector struct {
 	pageSize           int
 	maxResultWindow    int
 	casesPageSize      int
+	maxCasesLimit      int
 	caseAlertsPageSize int
 }
 
@@ -213,6 +214,7 @@ func newCollectorWith(s settings, httpClient *http.Client, syncCfg config.SyncCo
 		pageSize:           alertsPageSize,
 		maxResultWindow:    maxResultWindow,
 		casesPageSize:      casesPageSize,
+		maxCasesLimit:      maxCasesLimit,
 		caseAlertsPageSize: caseAlertsPageSize,
 	}, nil
 }
@@ -392,37 +394,79 @@ func (c *Collector) Collect(ctx context.Context, checkpoint string) (collector.B
 }
 
 // collectAlerts pages through write_time:[lower TO upper} sorted ascending,
-// skipping the IDs already delivered at the checkpoint ts, until the window
-// is exhausted, max_alerts_per_sync is reached or from+size hits 10000.
+// until the window is exhausted or max_alerts_per_sync is reached.
+//
+// Paging is keyset, not offset: every page is a new query anchored at the
+// highest write_time read so far (write_time:[anchor TO upper}, from=0), and
+// the hits already read at exactly that write_time (the checkpoint's IDs on
+// the first page) are skipped by ID. With from/size offsets, an alert that
+// leaves the result set while paging (marked Ignored, say) shifts every later
+// alert one place to the left, so the alert at the next page boundary is
+// never read while the checkpoint moves past it. An anchored query has no
+// boundary to shift, and the from+size <= 10000 window only matters when one
+// millisecond holds more alerts than a page.
+//
+// Keyset paging relies on the server sorting by write_time; a page that comes
+// back unsorted fails the cycle instead of silently losing alerts. Alerts
+// that share one write_time come back first, in any order, so asking for
+// the ones already read on top of a full page always makes progress. Only a
+// millisecond holding a full page or more of alerts is paged by offset
+// (that part is exact only if the server returns ties in a stable order).
 func (c *Collector) collectAlerts(ctx context.Context, batch *collector.Batch, cp checkpointState, valid bool, tracker *checkpointTracker, lower, upper int64) error {
-	query := buildAlertsQuery(rangeClause(fieldWriteTime, lower, upper), c.minScore, c.settings.tenantID)
-
-	skip := map[string]struct{}{}
+	// IDs an earlier cycle delivered at the checkpoint ts.
+	delivered := map[string]struct{}{}
 	if valid {
 		for _, id := range cp.IDs {
-			skip[id] = struct{}{}
+			delivered[id] = struct{}{}
 		}
 	}
-	seen := map[string]struct{}{}
+	anchor := lower
+	read := map[string]struct{}{}         // hits read this cycle at write_time == anchor (index/_id)
+	reread := 0                           // hits at the anchor that offset pages returned again
+	unpositioned := map[string]struct{}{} // hits read without a usable write_time (index/_id)
+	seen := map[string]struct{}{}         // alert IDs read this cycle
 	accepted := 0
-	from := 0
-	windowFull := false
-	lastWriteTime := int64(math.MinInt64)
-	warnedOrder := false
 
-	for accepted < c.maxAlerts {
-		// Never ask for more than can still be accepted (plus the IDs that
-		// will be skipped), and never past the from+size window.
-		size := min(c.pageSize, c.maxResultWindow-from, c.maxAlerts-accepted+len(skip))
-		if size <= 0 {
-			windowFull = true
-			break
+	for accepted < c.maxAlerts && anchor < upper {
+		// The hits at the anchor that will come back first: the ones read on
+		// earlier pages, plus the checkpoint's while the anchor is its ts.
+		known := len(read)
+		if valid && anchor == cp.TS {
+			known += len(delivered)
 		}
+		want := min(c.pageSize, c.maxAlerts-accepted)
+		from, size := 0, min(c.pageSize, want+known)
+		byOffset := known >= c.pageSize
+		if byOffset {
+			// A page cannot get past the hits already read at this write_time:
+			// page through that millisecond by offset instead.
+			from = known + reread
+			size = min(want, c.maxResultWindow-from)
+		}
+		if size <= 0 {
+			// Every reachable result at this write_time was already read: more
+			// alerts share one millisecond than the search window allows.
+			// Step past it rather than stall forever.
+			log.Error().
+				Int64("write_time", anchor).
+				Int("window", c.maxResultWindow).
+				Msg("stellar cyber: more alerts share one write_time than the search window allows; skipping the rest of that millisecond")
+			tracker.skipPast(anchor)
+			anchor++
+			read, reread = map[string]struct{}{}, 0
+			continue
+		}
+
+		pageLower := anchor
+		query := buildAlertsQuery(rangeClause(fieldWriteTime, pageLower, upper), c.minScore, c.settings.tenantID)
 		res, err := c.client.searchAlerts(ctx, query, from, size)
 		if err != nil {
-			return fmt.Errorf("searching alerts (from=%d): %w", from, err)
+			return fmt.Errorf("searching alerts (write_time >= %d, from=%d): %w", pageLower, from, err)
 		}
 		hits := res.Hits.Hits
+		progressed, pastUpper := false, false
+		rereadBefore := reread
+		prev := pageLower
 		for _, hit := range hits {
 			if accepted >= c.maxAlerts {
 				break // the rest is collected next cycle
@@ -431,14 +475,45 @@ func (c *Collector) collectAlerts(ctx context.Context, batch *collector.Batch, c
 				log.Warn().Str("index", hit.Index).Msg("stellar cyber: skipping alert without _id")
 				continue
 			}
-			if _, ok := skip[hit.ID]; ok {
-				delete(skip, hit.ID)
-				continue
+			key := hit.Index + "/" + hit.ID
+			writeTime, positioned := epochMs(hit.Source["write_time"])
+			if positioned {
+				if writeTime < pageLower {
+					continue // outside the queried range
+				}
+				if writeTime >= upper {
+					pastUpper = true // sorted: nothing after it is in the window
+					break
+				}
+				if writeTime < prev {
+					return fmt.Errorf("searching alerts: results are not sorted by write_time (%d after %d); the server ignored sort=%s:asc, which incremental collection requires", writeTime, prev, fieldWriteTime)
+				}
+				prev = writeTime
+				if writeTime > anchor {
+					// Sorted: every hit before this write_time has been read.
+					anchor = writeTime
+					read, reread = map[string]struct{}{}, 0
+				} else {
+					_, done := read[key]
+					if _, inCheckpoint := delivered[hit.ID]; inCheckpoint && valid && writeTime == cp.TS {
+						done = true // delivered by an earlier cycle
+					}
+					if done {
+						if byOffset && anchor == pageLower {
+							reread++ // the next offset page starts after it
+						}
+						continue
+					}
+				}
+				read[key] = struct{}{}
+			} else {
+				if _, done := unpositioned[key]; done {
+					continue
+				}
+				unpositioned[key] = struct{}{}
 			}
-			writeTime, hasWriteTime := epochMs(hit.Source["write_time"])
-			if hasWriteTime && (writeTime < lower || writeTime >= upper) {
-				continue
-			}
+			progressed = true
+
 			batch.Fetched++
 			if _, dup := seen[hit.ID]; dup {
 				batch.DuplicatesRemoved++
@@ -446,31 +521,17 @@ func (c *Collector) collectAlerts(ctx context.Context, batch *collector.Batch, c
 			}
 			seen[hit.ID] = struct{}{}
 			accepted++
-			if hasWriteTime {
-				if writeTime < lastWriteTime && !warnedOrder {
-					warnedOrder = true
-					log.Warn().Msg("stellar cyber: alerts are not sorted by write_time; the server may ignore sort")
-				}
-				lastWriteTime = max(lastWriteTime, writeTime)
+			if positioned {
 				tracker.observe(writeTime, hit.ID)
 			}
 			c.appendMapped(batch, hit, nil)
 		}
-		from += len(hits)
-		if len(hits) < size {
+		if pastUpper || len(hits) < size {
 			break // window exhausted
 		}
-	}
-
-	// Every reachable result was already delivered at the checkpoint ts: more
-	// than maxResultWindow alerts share one millisecond. Step past it rather
-	// than stall forever.
-	if windowFull && accepted == 0 && valid {
-		log.Error().
-			Int64("write_time", cp.TS).
-			Int("window", c.maxResultWindow).
-			Msg("stellar cyber: more alerts share one write_time than the search window allows; skipping the rest of that millisecond")
-		tracker.skipPast(cp.TS)
+		if !progressed && reread == rereadBefore {
+			return fmt.Errorf("searching alerts: no progress at write_time %d (a full page of alerts already read); the server may ignore the query or sort", anchor)
+		}
 	}
 	return nil
 }
@@ -560,55 +621,132 @@ func (c *Collector) listModifiedCases(ctx context.Context, lower, upper int64) (
 	var all []stellarCase
 	seen := map[string]struct{}{}
 	for _, status := range caseStatuses {
-		statusSeen := map[string]struct{}{}
-		for skip := 0; ; {
-			query := url.Values{}
-			query.Set("FROM~"+fieldModifiedAt, strconv.FormatInt(lower, 10))
-			query.Set("TO~"+fieldModifiedAt, strconv.FormatInt(upper, 10))
-			query.Set("sort", fieldModifiedAt)
-			query.Set("order", "asc")
-			query.Set("limit", strconv.Itoa(c.casesPageSize))
-			query.Set("skip", strconv.Itoa(skip))
-			query.Set("status", status)
-			if c.settings.tenantID != "" {
-				query.Set("tenantid", c.settings.tenantID)
+		cases, err := c.listStatusCases(ctx, status, lower, upper)
+		if err != nil {
+			return nil, err
+		}
+		for _, cs := range cases {
+			if _, dup := seen[cs.ID]; dup {
+				continue // its status changed between two queries
 			}
-			page, err := c.client.listCases(ctx, query)
-			if err != nil {
-				return nil, fmt.Errorf("listing %q cases: %w", status, err)
-			}
-			fresh := 0
-			for _, cs := range page.Data.Cases {
-				if cs.ID == "" || !cs.ModifiedAt.ok {
-					log.Warn().Str("case", cs.ID).Msg("stellar cyber: skipping case without _id or modified_at")
-					continue
-				}
-				if _, dup := statusSeen[cs.ID]; dup {
-					continue
-				}
-				statusSeen[cs.ID] = struct{}{}
-				fresh++
-				if _, dup := seen[cs.ID]; dup {
-					continue // its status changed between two queries
-				}
-				seen[cs.ID] = struct{}{}
-				all = append(all, cs)
-			}
-			n := len(page.Data.Cases)
-			skip += n
-			if n < c.casesPageSize {
-				break
-			}
-			if total := page.total(); total > 0 && int64(skip) >= total {
-				break
-			}
-			if fresh == 0 {
-				log.Warn().Str("status", status).Msg("stellar cyber: cases page repeated (skip ignored?); stopping")
-				break
-			}
+			seen[cs.ID] = struct{}{}
+			all = append(all, cs)
 		}
 	}
 	return all, nil
+}
+
+// errCasesUnsorted reports a cases page that is not sorted by modified_at.
+var errCasesUnsorted = errors.New("cases are not sorted by modified_at")
+
+// listStatusCases lists every case of one status modified in [lower, upper).
+// It pages by keyset and falls back to skip offsets when the server does not
+// sort by modified_at (the cases are sorted locally afterwards, so the
+// listing itself does not depend on the order).
+func (c *Collector) listStatusCases(ctx context.Context, status string, lower, upper int64) ([]stellarCase, error) {
+	cases, err := c.pageStatusCases(ctx, status, lower, upper, true)
+	if errors.Is(err, errCasesUnsorted) {
+		log.Warn().Str("status", status).Msg("stellar cyber: the server ignored sort=modified_at; listing these cases by offset")
+		return c.pageStatusCases(ctx, status, lower, upper, false)
+	}
+	return cases, err
+}
+
+// pageStatusCases pages through one status's cases.
+//
+// With keyset paging every page is a new query anchored at the highest
+// modified_at listed so far (FROM~modified_at=anchor, skip=0), asking for the
+// cases already listed at exactly that modified_at on top of a full page.
+// With skip offsets, a listed case that is modified meanwhile (its new
+// modified_at is past the window) shifts the later cases one place to the
+// left, so the case at the next page boundary is never listed, and the
+// checkpoint then moves past it for good.
+func (c *Collector) pageStatusCases(ctx context.Context, status string, lower, upper int64, keyset bool) ([]stellarCase, error) {
+	var out []stellarCase
+	listed := map[string]struct{}{}
+	anchor := lower
+	atAnchor := map[string]struct{}{} // cases listed with modified_at == anchor
+	reread := 0                       // cases at the anchor that skip pages returned again
+	offset := 0
+
+	for {
+		from, skip, limit := lower, offset, c.casesPageSize
+		bySkip := false
+		if keyset {
+			from, skip, limit = anchor, 0, c.casesPageSize+len(atAnchor)
+			if limit > c.maxCasesLimit {
+				// More cases share one modified_at than a page can hold on top
+				// of a full page: page through that millisecond by skip.
+				bySkip = true
+				skip, limit = len(atAnchor)+reread, c.casesPageSize
+			}
+		}
+		query := url.Values{}
+		query.Set("FROM~"+fieldModifiedAt, strconv.FormatInt(from, 10))
+		query.Set("TO~"+fieldModifiedAt, strconv.FormatInt(upper, 10))
+		query.Set("sort", fieldModifiedAt)
+		query.Set("order", "asc")
+		query.Set("limit", strconv.Itoa(limit))
+		query.Set("skip", strconv.Itoa(skip))
+		query.Set("status", status)
+		if c.settings.tenantID != "" {
+			query.Set("tenantid", c.settings.tenantID)
+		}
+		page, err := c.client.listCases(ctx, query)
+		if err != nil {
+			return nil, fmt.Errorf("listing %q cases: %w", status, err)
+		}
+
+		fresh := 0
+		pastUpper := false
+		rereadBefore := reread
+		prev := from
+		for _, cs := range page.Data.Cases {
+			if cs.ID == "" || !cs.ModifiedAt.ok {
+				log.Warn().Str("case", cs.ID).Msg("stellar cyber: skipping case without _id or modified_at")
+				continue
+			}
+			modifiedAt := cs.ModifiedAt.ms
+			if keyset {
+				if modifiedAt < prev {
+					return nil, errCasesUnsorted
+				}
+				prev = modifiedAt
+				if modifiedAt >= upper {
+					pastUpper = true // sorted: nothing after it is in the window
+					break
+				}
+				if modifiedAt > anchor {
+					anchor = modifiedAt
+					atAnchor, reread = map[string]struct{}{}, 0
+				} else if _, again := atAnchor[cs.ID]; again && bySkip && anchor == from {
+					reread++ // the next skip page starts after it
+				}
+				atAnchor[cs.ID] = struct{}{}
+			}
+			if _, dup := listed[cs.ID]; dup {
+				continue
+			}
+			listed[cs.ID] = struct{}{}
+			fresh++
+			out = append(out, cs)
+		}
+
+		n := len(page.Data.Cases)
+		offset += n
+		if pastUpper || n < limit {
+			break
+		}
+		if total := page.total(); total > 0 && int64(skip+n) >= total {
+			break
+		}
+		if fresh == 0 && reread == rereadBefore {
+			// A full page of cases already listed: going on would loop, and
+			// stopping early could let the checkpoint pass unlisted cases.
+			return nil, fmt.Errorf("listing %q cases: no progress (a full page of cases already listed at modified_at %d); the server may ignore skip or FROM~%s", status, anchor, fieldModifiedAt)
+		}
+	}
+	return out, nil
 }
 
 // allCaseAlerts pages /cases/{id}/alerts until a short page.

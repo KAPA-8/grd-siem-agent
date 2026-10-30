@@ -348,9 +348,12 @@ grd-siem-agent
 │   ├── /api/v1/siem-agent/sync       → send alerts (batches of 500)
 │   └── /api/v1/siem-agent/heartbeat  → health status
 ├── Buffer (SQLite, offline resilience)
-│   └── Keeps undelivered batches until the platform accepts them
+│   └── Keeps undelivered batches until the platform accepts them; a batch
+│       the platform refuses 5 times (e.g. its connection was deleted) is
+│       dropped, since the checkpoint never passes undelivered alerts
 ├── Heartbeat (background, every 60s)
-│   └── Reports uptime, memory, version and status:
+│   └── Reports uptime, memory, version and status (the SIEM health check
+│       runs every 5 min, never while a collection is running):
 │       healthy, degraded (delivery problems, buffered batches)
 │       or error (SIEM unreachable, collector not initialized)
 └── Updater (background, every 10min)
@@ -598,6 +601,8 @@ sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent validate \
 | QRadar `/system/about` returns 403 | API key lacks permission for that endpoint | Safe to ignore — the agent works via the offenses endpoint |
 | Agent not collecting alerts | Severity filter too strict | Lower `sync.filters.min_severity` (e.g., `"low"` or `"info"`) |
 | Buffer growing large | Platform unreachable | Check network/firewall to platform URL |
+| `platform keeps refusing a buffered batch; dropping it` | A batch stored during an outage was refused 5 times (e.g. its SIEM connection was deleted or re-created) | Nothing to do: the batch is dropped and the alerts of the current connection are collected again from the checkpoint |
+| Stellar Cyber `results are not sorted by write_time` | The alert search ignored `sort`, which incremental collection needs | Use `data_source: cases` and report the Stellar Cyber version |
 | Binary won't execute | Wrong architecture | Run `file ./grd-siem-agent` — must show `ELF 64-bit` for Linux, not `Mach-O` (macOS) |
 | `unzip: cannot find zipfile` | Tried to unzip the binary | The binary is not a zip — run it directly with `./grd-siem-agent` |
 

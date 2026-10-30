@@ -15,6 +15,7 @@ import (
 	"github.com/grd-platform/grd-siem-agent/internal/buffer"
 	"github.com/grd-platform/grd-siem-agent/internal/collector"
 	"github.com/grd-platform/grd-siem-agent/internal/config"
+	"github.com/grd-platform/grd-siem-agent/internal/health"
 	"github.com/grd-platform/grd-siem-agent/internal/models"
 	"github.com/grd-platform/grd-siem-agent/internal/transport"
 )
@@ -522,8 +523,77 @@ func TestDrainBuffer_PermanentRejectionDoesNotBlockTheQueue(t *testing.T) {
 	if got := sentNames(payloadsOf(left)); !reflect.DeepEqual(got, []string{"gone", "partial"}) {
 		t.Errorf("buffer holds %v, want the rejected and the partial batch", got)
 	}
+	for _, b := range left {
+		if b.Rejections != 1 {
+			t.Errorf("batch %d: rejections = %d, want 1", b.ID, b.Rejections)
+		}
+	}
 	if got := sentNames(platform.sent()); !reflect.DeepEqual(got, []string{"gone", "b2", "partial", "b4"}) {
 		t.Errorf("sent %v", got)
+	}
+}
+
+// Regression (review P3): a batch the platform keeps refusing (its connection
+// was deleted: 404; or a partial import) used to be re-sent on every cycle
+// forever and kept the heartbeat degraded. It is dropped after
+// maxBufferedRejections refusals.
+func TestDrainBuffer_RefusedBatchIsDroppedAfterRepeatedRejections(t *testing.T) {
+	buf := newSQLiteBuffer(t)
+	pushBatches(t, buf, "gone", "partial")
+	platform := &fakePlatform{respond: func(_ int, p models.SyncPayload) (*models.SyncResponse, error) {
+		if strings.HasPrefix(p.Alerts[0].ExternalID, "gone") {
+			return nil, &transport.HTTPError{Op: "sync", StatusCode: 404, Body: "connection not found"}
+		}
+		return &models.SyncResponse{Success: true, AlertsErrors: 1}, nil
+	}}
+	a := newTestAgent(t, &fakeCollector{}, platform, buf)
+	a.status.SetInit(nil)
+	a.healthEvery = time.Hour
+
+	for i := 1; i < maxBufferedRejections; i++ {
+		a.drainBuffer(context.Background())
+	}
+	left, _ := buf.Peek(0, 10)
+	if len(left) != 2 || left[0].Rejections != maxBufferedRejections-1 || left[1].Rejections != maxBufferedRejections-1 {
+		t.Fatalf("after %d drains the buffer holds %+v, want both batches refused %d times", maxBufferedRejections-1, left, maxBufferedRejections-1)
+	}
+	if r := a.heartbeatStatus(context.Background()); r.Status != health.StatusDegraded {
+		t.Errorf("status with refused batches waiting = %s, want degraded", r.Status)
+	}
+
+	a.drainBuffer(context.Background())
+	if n := bufLen(t, buf); n != 0 {
+		t.Fatalf("buffer holds %d batches after %d refusals, want them dropped", n, maxBufferedRejections)
+	}
+	if got := len(platform.sent()); got != 2*maxBufferedRejections {
+		t.Errorf("posts = %d, want %d", got, 2*maxBufferedRejections)
+	}
+	a.drainBuffer(context.Background())
+	if got := len(platform.sent()); got != 2*maxBufferedRejections {
+		t.Errorf("a dropped batch was sent again (%d posts)", got)
+	}
+	if r := a.heartbeatStatus(context.Background()); r.Status != health.StatusHealthy || r.BufferedBatches != 0 {
+		t.Errorf("status after dropping = %+v, want healthy with an empty buffer", r)
+	}
+}
+
+// A batch that was refused before and is then accepted is delivered normally.
+func TestDrainBuffer_RefusedThenAcceptedBatchIsDelivered(t *testing.T) {
+	buf := buffer.NewMemoryBuffer()
+	pushBatches(t, buf, "flaky")
+	refuse := true
+	platform := &fakePlatform{respond: func(_ int, p models.SyncPayload) (*models.SyncResponse, error) {
+		if refuse {
+			return nil, &transport.HTTPError{Op: "sync", StatusCode: 422, Body: "invalid"}
+		}
+		return okResponse(p), nil
+	}}
+	a := newTestAgent(t, &fakeCollector{}, platform, buf)
+	a.drainBuffer(context.Background())
+	refuse = false
+	a.drainBuffer(context.Background())
+	if n := bufLen(t, buf); n != 0 || len(platform.sent()) != 2 {
+		t.Errorf("buffered = %d, posts = %d; want the batch delivered on the second drain", n, len(platform.sent()))
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/grd-platform/grd-siem-agent/internal/buffer"
+	"github.com/grd-platform/grd-siem-agent/internal/collector"
 	"github.com/grd-platform/grd-siem-agent/internal/health"
 	"github.com/grd-platform/grd-siem-agent/internal/models"
 	"github.com/grd-platform/grd-siem-agent/internal/transport"
@@ -185,5 +186,136 @@ func TestHeartbeatStatus_RunsHealthCheckPeriodically(t *testing.T) {
 	coll.healthErr = nil
 	if r := a.heartbeatStatus(ctx); r.Status != health.StatusHealthy || coll.healthCalls != 2 {
 		t.Errorf("recovered health check: %+v (calls %d)", r, coll.healthCalls)
+	}
+}
+
+// gatedCollector blocks Collect or HealthCheck until released and records
+// whether the two ever ran at the same time.
+type gatedCollector struct {
+	fakeCollector
+	gateCollect, gateHealth bool
+	started                 chan string
+	release                 chan struct{}
+
+	mu                      sync.Mutex
+	active, overlaps        int
+	collectCalls, healthRun int
+}
+
+func newGatedCollector() *gatedCollector {
+	return &gatedCollector{started: make(chan string, 4), release: make(chan struct{})}
+}
+
+func (g *gatedCollector) enter() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.active++
+	if g.active > 1 {
+		g.overlaps++
+	}
+}
+
+func (g *gatedCollector) leave() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.active--
+}
+
+func (g *gatedCollector) counts() (collects, healths, overlaps int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.collectCalls, g.healthRun, g.overlaps
+}
+
+func (g *gatedCollector) Collect(ctx context.Context, checkpoint string) (collector.Batch, error) {
+	g.enter()
+	defer g.leave()
+	g.mu.Lock()
+	g.collectCalls++
+	g.mu.Unlock()
+	if g.gateCollect {
+		g.started <- "collect"
+		<-g.release
+	}
+	return g.fakeCollector.Collect(ctx, checkpoint)
+}
+
+func (g *gatedCollector) HealthCheck(ctx context.Context) error {
+	g.enter()
+	defer g.leave()
+	g.mu.Lock()
+	g.healthRun++
+	g.mu.Unlock()
+	if g.gateHealth {
+		g.started <- "health"
+		<-g.release
+	}
+	return g.fakeCollector.HealthCheck(ctx)
+}
+
+// Regression (review P3): the heartbeat's health check ran while Collect was
+// paging, so the SIEM saw concurrent requests and a health check stuck
+// behind the collection's token exchange reported "error". A due health
+// check is now skipped while a collection runs, and a successful collection
+// counts as a health check.
+func TestHeartbeatStatus_HealthCheckSkippedWhileCollecting(t *testing.T) {
+	coll := newGatedCollector()
+	coll.gateCollect = true
+	a := newAgent(testConfig(t), coll, &fakePlatform{}, buffer.NewMemoryBuffer())
+	ctx := context.Background()
+	if err := a.initCollector(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a.healthEvery = 0 // always due
+
+	done := make(chan struct{})
+	go func() { a.collectAndSend(ctx); close(done) }()
+	<-coll.started
+	if r := a.heartbeatStatus(ctx); r.Status != health.StatusHealthy {
+		t.Errorf("status while collecting = %+v", r)
+	}
+	if _, healths, _ := coll.counts(); healths != 0 {
+		t.Errorf("health check ran during Collect (%d calls)", healths)
+	}
+	close(coll.release)
+	<-done
+
+	a.healthEvery = time.Hour
+	a.heartbeatStatus(ctx)
+	if _, healths, _ := coll.counts(); healths != 0 {
+		t.Errorf("health check ran right after a successful collection (%d calls)", healths)
+	}
+	a.healthEvery = 0
+	a.heartbeatStatus(ctx)
+	if collects, healths, overlaps := coll.counts(); collects != 1 || healths != 1 || overlaps != 0 {
+		t.Errorf("collects=%d healths=%d overlaps=%d, want 1/1/0", collects, healths, overlaps)
+	}
+}
+
+// A collection that starts while a health check runs waits for it.
+func TestCollectAndSend_WaitsForARunningHealthCheck(t *testing.T) {
+	coll := newGatedCollector()
+	coll.gateHealth = true
+	a := newAgent(testConfig(t), coll, &fakePlatform{}, buffer.NewMemoryBuffer())
+	ctx := context.Background()
+	if err := a.initCollector(ctx); err != nil {
+		t.Fatal(err)
+	}
+	a.healthEvery = 0
+
+	hbDone := make(chan struct{})
+	go func() { a.heartbeatStatus(ctx); close(hbDone) }()
+	<-coll.started
+	collectDone := make(chan struct{})
+	go func() { a.collectAndSend(ctx); close(collectDone) }()
+	time.Sleep(50 * time.Millisecond) // give Collect a chance to run if it could
+	if collects, _, _ := coll.counts(); collects != 0 {
+		t.Errorf("Collect ran during a health check (%d calls)", collects)
+	}
+	close(coll.release)
+	<-hbDone
+	<-collectDone
+	if collects, healths, overlaps := coll.counts(); collects != 1 || healths != 1 || overlaps != 0 {
+		t.Errorf("collects=%d healths=%d overlaps=%d, want 1/1/0", collects, healths, overlaps)
 	}
 }

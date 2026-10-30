@@ -28,6 +28,12 @@ type Buffer interface {
 	// Ack removes a delivered batch. Acknowledging an unknown ID is a no-op.
 	Ack(id int64) error
 
+	// Reject records that the platform refused a batch (a permanent 4xx or a
+	// partial import) without removing it; Peek reports the count, so the
+	// caller can drop a batch that keeps being refused. Rejecting an unknown
+	// ID is a no-op.
+	Reject(id int64) error
+
 	// Len returns the number of buffered batches.
 	Len() (int, error)
 
@@ -40,6 +46,8 @@ type BufferedBatch struct {
 	ID      int64
 	Key     string
 	Payload models.SyncPayload
+	// Rejections is how many times the platform refused this batch.
+	Rejections int
 }
 
 // DeriveMetadata rebuilds sync metadata for batches stored without it (rows

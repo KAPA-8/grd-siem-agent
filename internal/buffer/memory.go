@@ -66,6 +66,19 @@ func (b *MemoryBuffer) Ack(id int64) error {
 	return nil
 }
 
+func (b *MemoryBuffer) Reject(id int64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	for i := range b.entries {
+		if b.entries[i].ID == id {
+			b.entries[i].Rejections++
+			break
+		}
+	}
+	return nil
+}
+
 func (b *MemoryBuffer) Len() (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

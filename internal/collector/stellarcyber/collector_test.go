@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -139,13 +141,18 @@ func TestCollectAlerts_PagingRespectsCap(t *testing.T) {
 	if got := externalIDs(batch); !reflect.DeepEqual(got, []string{"d1", "d2", "d3", "d4", "d5"}) {
 		t.Fatalf("collected %v", got)
 	}
-	var sizes, froms []string
+	// Keyset paging: page 2 is anchored at d3's write_time, asks for the 2
+	// alerts still wanted plus d3 (skipped by ID), and never uses from.
+	var sizes, froms, lowers []string
 	for _, r := range env.mock.recorded(searchPath) {
 		sizes = append(sizes, r.Query.Get("size"))
 		froms = append(froms, r.Query.Get("from"))
+		lowers = append(lowers, strings.TrimPrefix(strings.Split(r.Query.Get("q"), " TO ")[0], "write_time:["))
 	}
-	if !reflect.DeepEqual(sizes, []string{"3", "2"}) || !reflect.DeepEqual(froms, []string{"0", "3"}) {
-		t.Errorf("pages size=%v from=%v, want [3 2] [0 3]", sizes, froms)
+	lower := strconv.FormatInt(ms(env.clock.Now().Add(-7*24*time.Hour)), 10)
+	if !reflect.DeepEqual(sizes, []string{"3", "3"}) || !reflect.DeepEqual(froms, []string{"0", "0"}) ||
+		!reflect.DeepEqual(lowers, []string{lower, strconv.FormatInt(base+3, 10)}) {
+		t.Errorf("pages size=%v from=%v write_time>=%v, want [3 3] [0 0] [%s %d]", sizes, froms, lowers, lower, base+3)
 	}
 
 	env.mock.resetRequests()
@@ -158,8 +165,9 @@ func TestCollectAlerts_PagingRespectsCap(t *testing.T) {
 	}
 }
 
-// from+size never exceeds 10000; a larger backlog continues next cycle.
-func TestCollectAlerts_ResultWindowOf10000(t *testing.T) {
+// A 10050-alert backlog with the 10000 cap: every request is anchored
+// (from=0, size<=500), the cap holds and the rest continues next cycle.
+func TestCollectAlerts_LargeBacklogWithTheMaximumCap(t *testing.T) {
 	env := newSaaSEnv(t, func(_ *settings, sc *config.SyncConfig) { sc.MaxAlertsPerSync = 10000 })
 	base := ms(env.clock.Now().Add(-48 * time.Hour))
 	hits := make([]Hit, 10050)
@@ -169,18 +177,14 @@ func TestCollectAlerts_ResultWindowOf10000(t *testing.T) {
 	env.addAlerts(hits...)
 
 	batch := mustCollect(t, env.coll, "")
-	if len(batch.Templates) != 10000 {
-		t.Fatalf("collected %d, want 10000", len(batch.Templates))
+	if len(batch.Templates) != 10000 || batch.Templates[9999].ExternalID != "w09999" {
+		t.Fatalf("collected %d, want w00000..w09999", len(batch.Templates))
 	}
-	reqs := env.mock.recorded(searchPath)
-	if len(reqs) != 20 {
-		t.Errorf("search requests = %d, want 20 pages of 500", len(reqs))
-	}
-	for _, r := range reqs {
+	for _, r := range env.mock.recorded(searchPath) {
 		from, _ := strconv.Atoi(r.Query.Get("from"))
 		size, _ := strconv.Atoi(r.Query.Get("size"))
-		if from+size > 10000 || size > 500 {
-			t.Fatalf("request from=%d size=%d exceeds the window", from, size)
+		if from != 0 || size > 500 {
+			t.Fatalf("request from=%d size=%d, want anchored pages of at most 500", from, size)
 		}
 	}
 	if cp := decodeCheckpoint(t, batch.Checkpoint); cp.TS != base+9999*1000 || !reflect.DeepEqual(cp.IDs, []string{"w09999"}) {
@@ -193,11 +197,80 @@ func TestCollectAlerts_ResultWindowOf10000(t *testing.T) {
 	}
 }
 
+// Keyset paging is not bound by the from+size window: with a window of 10
+// and pages of 3, one cycle still collects all 25 alerts.
+func TestCollectAlerts_KeysetPagingIsNotBoundByTheResultWindow(t *testing.T) {
+	env := newSaaSEnv(t, nil)
+	env.coll.pageSize, env.coll.maxResultWindow = 3, 10
+	base := ms(env.clock.Now().Add(-time.Hour))
+	var want []string
+	for i := 0; i < 25; i++ {
+		id := fmt.Sprintf("k%02d", i)
+		want = append(want, id)
+		env.addAlerts(alertHit(id, base+int64(i), 50))
+	}
+	batch := mustCollect(t, env.coll, "")
+	if got := externalIDs(batch); !reflect.DeepEqual(got, want) {
+		t.Fatalf("collected %v", got)
+	}
+	for _, r := range env.mock.recorded(searchPath) {
+		if r.Query.Get("from") != "0" {
+			t.Errorf("request from=%s, want 0", r.Query.Get("from"))
+		}
+	}
+}
+
+// More alerts in one millisecond than a page can skip past: that millisecond
+// is paged by offset, and nothing is lost.
+func TestCollectAlerts_LargeTieGroupIsPagedByOffset(t *testing.T) {
+	env := newSaaSEnv(t, nil)
+	env.coll.pageSize = 2
+	ts := ms(env.clock.Now().Add(-time.Hour))
+	for i := 1; i <= 5; i++ {
+		env.addAlerts(alertHit("s"+strconv.Itoa(i), ts, 50))
+	}
+	env.addAlerts(alertHit("later", ts+1, 50))
+
+	batch := mustCollect(t, env.coll, "")
+	if got := externalIDs(batch); !reflect.DeepEqual(got, []string{"s1", "s2", "s3", "s4", "s5", "later"}) {
+		t.Fatalf("collected %v", got)
+	}
+	var froms []string
+	for _, r := range env.mock.recorded(searchPath) {
+		froms = append(froms, r.Query.Get("from"))
+	}
+	if !reflect.DeepEqual(froms, []string{"0", "2", "4", "0"}) {
+		t.Errorf("froms = %v, want [0 2 4 0]", froms)
+	}
+}
+
+// Offset pages inside a big tie group whose order changes on every request
+// may return only alerts already read: the offset moves on, the cycle does
+// not fail, and later write_times are still reached.
+func TestCollectAlerts_ReorderedLargeTieGroupDoesNotFailTheCycle(t *testing.T) {
+	env := newSaaSEnv(t, nil)
+	env.coll.pageSize = 3
+	env.mock.shuffleTies = true
+	ts := ms(env.clock.Now().Add(-time.Hour))
+	for i := 0; i < 30; i++ {
+		env.addAlerts(alertHit(fmt.Sprintf("t%02d", i), ts, 50))
+	}
+	env.addAlerts(alertHit("after", ts+1, 50))
+	for run := 0; run < 20; run++ {
+		env.mock.resetRequests()
+		batch := mustCollect(t, env.coll, "")
+		ids := externalIDs(batch)
+		if len(ids) == 0 || ids[len(ids)-1] != "after" {
+			t.Fatalf("run %d: collected %v, want the tie group then \"after\"", run, ids)
+		}
+	}
+}
+
 // When every reachable result was already delivered at the checkpoint ts,
 // the collector steps past that millisecond instead of stalling forever.
 func TestCollectAlerts_WindowExhaustedAtCheckpointTimestamp(t *testing.T) {
 	env := newSaaSEnv(t, nil)
-	env.coll.maxResultWindow = 4
+	env.coll.pageSize, env.coll.maxResultWindow = 2, 4
 	ts := ms(env.clock.Now().Add(-time.Hour))
 	for i := 1; i <= 6; i++ {
 		env.addAlerts(alertHit("s"+strconv.Itoa(i), ts, 50))
@@ -279,6 +352,104 @@ func TestCollectAlerts_DuplicatesAndOutOfWindowHits(t *testing.T) {
 	}
 	if batch.Fetched != 3 || batch.DuplicatesRemoved != 1 {
 		t.Errorf("fetched/dups = %d/%d, want 3/1", batch.Fetched, batch.DuplicatesRemoved)
+	}
+}
+
+// Regression (review P2): an alert on page 1 is marked Ignored while page 2
+// is being requested. With from/size offsets every later alert shifted one
+// place left and a0500 was never collected; anchored pages lose nothing.
+func TestCollectAlerts_AlertLeavingTheResultSetWhilePagingIsNotLost(t *testing.T) {
+	env := newSaaSEnv(t, nil)
+	var once sync.Once
+	searches := 0
+	env.mock.onRequest = func(m *mockStellar, r *http.Request) {
+		if r.URL.Path != searchPath {
+			return
+		}
+		if searches++; searches == 2 {
+			once.Do(func() {
+				m.mu.Lock()
+				m.alerts[10].Source["event_status"] = "Ignored"
+				m.mu.Unlock()
+			})
+		}
+	}
+	base := ms(env.clock.Now().Add(-time.Hour))
+	for i := 0; i < 800; i++ {
+		env.addAlerts(alertHit(fmt.Sprintf("a%04d", i), base+int64(i), 50))
+	}
+
+	batch := mustCollect(t, env.coll, "")
+	got := externalIDs(batch)
+	if len(got) != 800 {
+		missing := []string{}
+		seen := map[string]bool{}
+		for _, id := range got {
+			seen[id] = true
+		}
+		for i := 0; i < 800; i++ {
+			if id := fmt.Sprintf("a%04d", i); !seen[id] {
+				missing = append(missing, id)
+			}
+		}
+		t.Fatalf("collected %d alerts, missing %v", len(got), missing)
+	}
+	if cp := decodeCheckpoint(t, batch.Checkpoint); cp.TS != base+799 {
+		t.Errorf("checkpoint = %+v", cp)
+	}
+}
+
+// Elasticsearch may return alerts that share a write_time in a different
+// order on every request. Page boundaries fall inside the tie groups, and
+// across pages and capped cycles every alert is still delivered exactly once.
+func TestCollectAlerts_TieOrderVaryingBetweenPagesLosesNothing(t *testing.T) {
+	env := newSaaSEnv(t, func(_ *settings, sc *config.SyncConfig) { sc.MaxAlertsPerSync = 7 })
+	env.coll.pageSize = 5
+	env.mock.shuffleTies = true
+	base := ms(env.clock.Now().Add(-time.Hour))
+	for g := 0; g < 10; g++ {
+		for i := 0; i < 4; i++ {
+			env.addAlerts(alertHit(fmt.Sprintf("g%d-%02d", g, i), base+int64(g)*1000, 50))
+		}
+	}
+
+	delivered := map[string]int{}
+	cp := ""
+	for cycle := 0; cycle < 20; cycle++ {
+		batch := mustCollect(t, env.coll, cp)
+		for _, id := range externalIDs(batch) {
+			delivered[id]++
+		}
+		if len(batch.Templates) == 0 {
+			break
+		}
+		cp = batch.Checkpoint
+	}
+	if len(delivered) != 40 {
+		t.Fatalf("delivered %d distinct alerts, want 40", len(delivered))
+	}
+	if len(env.mock.recorded(searchPath)) < 10 {
+		t.Errorf("only %d searches: the tie groups did not straddle pages", len(env.mock.recorded(searchPath)))
+	}
+	for id, n := range delivered {
+		if n != 1 {
+			t.Errorf("%s delivered %d times", id, n)
+		}
+	}
+}
+
+// Keyset paging needs the server to sort by write_time; unsorted results
+// fail the cycle (checkpoint kept) instead of silently losing alerts.
+func TestCollectAlerts_UnsortedResultsFailTheCycle(t *testing.T) {
+	env := newSaaSEnv(t, nil)
+	env.mock.ignoreSort = true
+	base := ms(env.clock.Now().Add(-time.Hour))
+	for i := 5; i > 0; i-- {
+		env.addAlerts(alertHit("u"+strconv.Itoa(i), base+int64(i), 50))
+	}
+	_, err := env.coll.Collect(context.Background(), "")
+	if err == nil || !strings.Contains(err.Error(), "not sorted by write_time") {
+		t.Fatalf("err = %v, want a not-sorted error", err)
 	}
 }
 
@@ -401,7 +572,9 @@ func TestCollectCases_CasePagingAndTenant(t *testing.T) {
 	if len(batch.Templates) != 150 {
 		t.Fatalf("collected %d, want 150", len(batch.Templates))
 	}
-	var newSkips []string
+	// Keyset paging: page 2 is anchored at n099's modified_at and asks for
+	// a full page plus n099 itself.
+	var newPages [][3]string
 	for _, r := range env.mock.recorded(casesPath) {
 		if r.Path != casesPath {
 			continue
@@ -410,11 +583,133 @@ func TestCollectCases_CasePagingAndTenant(t *testing.T) {
 			t.Errorf("tenantid = %q", r.Query.Get("tenantid"))
 		}
 		if r.Query.Get("status") == "New" {
-			newSkips = append(newSkips, r.Query.Get("skip"))
+			newPages = append(newPages, [3]string{r.Query.Get("FROM~modified_at"), r.Query.Get("skip"), r.Query.Get("limit")})
 		}
 	}
-	if !reflect.DeepEqual(newSkips, []string{"0", "100"}) {
-		t.Errorf("New pages skip = %v, want [0 100]", newSkips)
+	lower := strconv.FormatInt(ms(env.clock.Now().Add(-7*24*time.Hour)), 10)
+	want := [][3]string{{lower, "0", "100"}, {strconv.FormatInt(base+99, 10), "0", "101"}}
+	if !reflect.DeepEqual(newPages, want) {
+		t.Errorf("New pages (FROM~, skip, limit) = %v, want %v", newPages, want)
+	}
+}
+
+// Regression (review P2): a page-1 case is modified (its modified_at jumps
+// past the window) while page 2 is being requested. With skip offsets the
+// later cases shifted one place left and n100 was never collected, while
+// the checkpoint moved past it; anchored pages lose nothing.
+func TestCollectCases_CaseModifiedWhileListingIsNotLost(t *testing.T) {
+	env := casesEnv(t, nil)
+	newListings := 0
+	env.mock.onRequest = func(m *mockStellar, r *http.Request) {
+		if r.URL.Path != casesPath || r.URL.Query().Get("status") != "New" {
+			return
+		}
+		if newListings++; newListings == 2 {
+			m.mu.Lock()
+			for i := range m.cases {
+				if m.cases[i].ID == "n010" { // an analyst updates n010 right now
+					m.cases[i].ModifiedAt = m.clock.Now().UnixMilli()
+				}
+			}
+			m.mu.Unlock()
+		}
+	}
+	base := ms(env.clock.Now().Add(-5 * time.Hour))
+	for i := 0; i < 150; i++ {
+		id := fmt.Sprintf("n%03d", i)
+		env.addCases(mockCase{ID: id, Status: "New", ModifiedAt: base + int64(i), Docs: docs(id, 1, base, 50)})
+	}
+
+	batch := mustCollect(t, env.coll, "")
+	if len(batch.Templates) != 150 {
+		t.Fatalf("first cycle collected %d alerts, want all 150", len(batch.Templates))
+	}
+	if cp := decodeCheckpoint(t, batch.Checkpoint); cp.TS != base+149 || !reflect.DeepEqual(cp.IDs, []string{"n149"}) {
+		t.Errorf("checkpoint = %+v", cp)
+	}
+	// n010 is collected again once its new modified_at is inside the window.
+	env.clock.Advance(15 * time.Minute)
+	batch = mustCollect(t, env.coll, batch.Checkpoint)
+	if got := externalIDs(batch); !reflect.DeepEqual(got, []string{"n010-000"}) {
+		t.Errorf("second cycle collected %v, want the modified n010", got)
+	}
+}
+
+// Cases sharing a modified_at come back in a different order on every
+// request: every case is still listed exactly once.
+func TestCollectCases_TieOrderVaryingBetweenPagesLosesNothing(t *testing.T) {
+	env := casesEnv(t, nil)
+	env.coll.casesPageSize = 20
+	env.mock.shuffleTies = true
+	base := ms(env.clock.Now().Add(-time.Hour))
+	for g := 0; g < 5; g++ {
+		for i := 0; i < 50; i++ {
+			id := fmt.Sprintf("g%d-%02d", g, i)
+			env.addCases(mockCase{ID: id, Status: "Escalated", ModifiedAt: base + int64(g)*1000, Docs: docs(id, 1, base, 50)})
+		}
+	}
+	batch := mustCollect(t, env.coll, "")
+	counts := map[string]int{}
+	for _, id := range externalIDs(batch) {
+		counts[id]++
+	}
+	if len(counts) != 250 || len(batch.Templates) != 250 {
+		t.Fatalf("collected %d alerts (%d distinct), want 250", len(batch.Templates), len(counts))
+	}
+}
+
+// More cases in one millisecond than one request may return on top of a
+// page: that millisecond is paged by skip, and nothing is lost.
+func TestCollectCases_LargeTieGroupIsPagedBySkip(t *testing.T) {
+	env := casesEnv(t, nil)
+	env.coll.casesPageSize, env.coll.maxCasesLimit = 3, 5
+	ts := ms(env.clock.Now().Add(-time.Hour))
+	for i := 1; i <= 8; i++ {
+		id := fmt.Sprintf("t%d", i)
+		env.addCases(mockCase{ID: id, Status: "New", ModifiedAt: ts, Docs: docs(id, 1, ts, 50)})
+	}
+	env.addCases(
+		mockCase{ID: "later1", Status: "New", ModifiedAt: ts + 1, Docs: docs("later1", 1, ts, 50)},
+		mockCase{ID: "later2", Status: "New", ModifiedAt: ts + 2, Docs: docs("later2", 1, ts, 50)},
+	)
+	batch := mustCollect(t, env.coll, "")
+	if len(batch.Templates) != 10 {
+		t.Fatalf("collected %v, want 10 alerts", externalIDs(batch))
+	}
+	var pages [][2]string
+	for _, r := range env.mock.recorded(casesPath) {
+		if r.Path == casesPath && r.Query.Get("status") == "New" {
+			pages = append(pages, [2]string{r.Query.Get("skip"), r.Query.Get("limit")})
+		}
+	}
+	want := [][2]string{{"0", "3"}, {"3", "3"}, {"6", "3"}, {"0", "4"}}
+	if !reflect.DeepEqual(pages, want) {
+		t.Errorf("New pages (skip, limit) = %v, want %v", pages, want)
+	}
+}
+
+// A server that ignores sort=modified_at gets the offset listing (the cases
+// are sorted locally), so cases mode keeps working.
+func TestCollectCases_UnsortedListingFallsBackToSkip(t *testing.T) {
+	env := casesEnv(t, nil)
+	env.mock.ignoreSort = true
+	base := ms(env.clock.Now().Add(-5 * time.Hour))
+	for i := 149; i >= 0; i-- {
+		id := fmt.Sprintf("r%03d", i)
+		env.addCases(mockCase{ID: id, Status: "New", ModifiedAt: base + int64(i), Docs: docs(id, 1, base, 50)})
+	}
+	batch := mustCollect(t, env.coll, "")
+	if got := externalIDs(batch); len(got) != 150 || got[0] != "r000-000" || got[149] != "r149-000" {
+		t.Fatalf("collected %d alerts (%v ... )", len(got), got[:min(3, len(got))])
+	}
+	var skips []string
+	for _, r := range env.mock.recorded(casesPath) {
+		if r.Path == casesPath && r.Query.Get("status") == "New" {
+			skips = append(skips, r.Query.Get("skip"))
+		}
+	}
+	if !reflect.DeepEqual(skips, []string{"0", "0", "100"}) {
+		t.Errorf("New pages skip = %v, want the keyset attempt then [0 100]", skips)
 	}
 }
 

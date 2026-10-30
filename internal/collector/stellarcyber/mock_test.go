@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -92,11 +93,59 @@ type mockStellar struct {
 	cases         []mockCase
 	failures      []injectedFailure
 	requests      []recordedRequest
+
+	// shuffleTies returns records with equal sort values in a different
+	// order on every request, as Elasticsearch may across shards/replicas.
+	shuffleTies bool
+	// ignoreSort returns records in insertion order whatever sort says.
+	ignoreSort bool
+	rng        *rand.Rand
+
+	// onRequest, when set, runs before each request is served (without the
+	// lock held), so tests can change the data between two pages.
+	onRequest func(m *mockStellar, r *http.Request)
 }
 
 func newMockStellar(t *testing.T, clock *fakeClock) *mockStellar {
-	return &mockStellar{t: t, clock: clock, tokenTTL: 10 * time.Minute, tokens: map[string]time.Time{}}
+	return &mockStellar{t: t, clock: clock, tokenTTL: 10 * time.Minute, tokens: map[string]time.Time{}, rng: rand.New(rand.NewSource(1))}
 }
+
+// sortRecords sorts n records by key, honouring ignoreSort and shuffleTies.
+func (m *mockStellar) sortRecords(n int, key func(i int) float64, swap func(i, j int), desc bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.ignoreSort {
+		return
+	}
+	less := func(i, j int) bool {
+		if desc {
+			return key(i) > key(j)
+		}
+		return key(i) < key(j)
+	}
+	sort.Stable(sortable{n, less, swap})
+	if !m.shuffleTies {
+		return
+	}
+	for start := 0; start < n; {
+		end := start + 1
+		for end < n && key(end) == key(start) {
+			end++
+		}
+		m.rng.Shuffle(end-start, func(i, j int) { swap(start+i, start+j) })
+		start = end
+	}
+}
+
+type sortable struct {
+	n    int
+	less func(i, j int) bool
+	swap func(i, j int)
+}
+
+func (s sortable) Len() int           { return s.n }
+func (s sortable) Less(i, j int) bool { return s.less(i, j) }
+func (s sortable) Swap(i, j int)      { s.swap(i, j) }
 
 func (m *mockStellar) failNext(pathPrefix string, status int, retryAfter string) {
 	m.mu.Lock()
@@ -141,6 +190,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func (m *mockStellar) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if m.onRequest != nil {
+		m.onRequest(m, r)
+	}
 	m.mu.Lock()
 	m.requests = append(m.requests, recordedRequest{
 		Method:        r.Method,
@@ -362,14 +414,10 @@ func (m *mockStellar) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	if sortSpec := q.Get("sort"); sortSpec != "" {
 		field, order, _ := strings.Cut(sortSpec, ":")
-		sort.SliceStable(matched, func(i, j int) bool {
-			a, _ := numeric(matched[i].Source[field])
-			b, _ := numeric(matched[j].Source[field])
-			if order == "desc" {
-				return a > b
-			}
-			return a < b
-		})
+		m.sortRecords(len(matched), func(i int) float64 {
+			v, _ := numeric(matched[i].Source[field])
+			return v
+		}, func(i, j int) { matched[i], matched[j] = matched[j], matched[i] }, order == "desc")
 	}
 	total := len(matched)
 	page := []Hit{}
@@ -419,7 +467,10 @@ func (m *mockStellar) handleCases(w http.ResponseWriter, r *http.Request) {
 		matched = append(matched, c)
 	}
 	m.mu.Unlock()
-	sort.SliceStable(matched, func(i, j int) bool { return matched[i].ModifiedAt < matched[j].ModifiedAt })
+	if q.Get("sort") == "modified_at" {
+		m.sortRecords(len(matched), func(i int) float64 { return float64(matched[i].ModifiedAt) },
+			func(i, j int) { matched[i], matched[j] = matched[j], matched[i] }, q.Get("order") == "desc")
+	}
 
 	out := []map[string]any{}
 	for i := skip; i < len(matched) && i < skip+limit; i++ {
