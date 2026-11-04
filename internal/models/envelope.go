@@ -10,8 +10,8 @@ type SyncPayload struct {
 
 // SyncMetadata provides context about the sync cycle.
 type SyncMetadata struct {
-	DateFrom          string `json:"date_from"`           // ISO 8601
-	DateTo            string `json:"date_to"`             // ISO 8601
+	DateFrom          string `json:"date_from"` // ISO 8601
+	DateTo            string `json:"date_to"`   // ISO 8601
 	SIEMType          string `json:"siem_type"`
 	TotalFetched      int    `json:"total_fetched"`
 	TotalAfterFilter  int    `json:"total_after_filter"`
@@ -19,13 +19,18 @@ type SyncMetadata struct {
 	AgentVersion      string `json:"agent_version"`
 }
 
-// SyncResponse is the response from POST /api/v1/siem-agent/sync.
+// SyncResponse is the response from POST /api/v1/siem-agent/sync
+// (AgentSyncResponse on the platform).
 type SyncResponse struct {
-	Success        bool   `json:"success"`
-	SyncLogID      string `json:"sync_log_id"`
-	ImportID       string `json:"import_id"`
-	AlertsImported int    `json:"alerts_imported"`
-	AlertsSkipped  int    `json:"alerts_skipped"`
-	AlertsErrors   int    `json:"alerts_errors"`
-	LimitReached   bool   `json:"limit_reached"`
+	Success         bool   `json:"success"`
+	SyncLogID       string `json:"sync_log_id"`
+	ImportID        string `json:"import_id"`
+	AlertsImported  int    `json:"alerts_imported"`
+	AlertsSkipped   int    `json:"alerts_skipped"`   // dropped by the organization's alert limit
+	AlertsDuplicate int    `json:"alerts_duplicate"` // already stored for this connection (same externalId)
+	AlertsErrors    int    `json:"alerts_errors"`    // transient failures: the same window is sent again
+	AlertsRejected  int    `json:"alerts_rejected"`  // permanently invalid alerts: re-sending them changes nothing
+	LimitReached    bool   `json:"limit_reached"`
+	Message         string `json:"message,omitempty"`
+	Error           string `json:"error,omitempty"`
 }

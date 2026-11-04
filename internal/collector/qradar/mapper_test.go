@@ -3,6 +3,7 @@ package qradar
 import (
 	"testing"
 
+	"github.com/grd-platform/grd-siem-agent/internal/mapping"
 	"github.com/grd-platform/grd-siem-agent/internal/models"
 )
 
@@ -101,32 +102,42 @@ func TestMapOffenseToAlert(t *testing.T) {
 	}
 }
 
-func TestAlertToImportTemplate(t *testing.T) {
-	alert := models.Alert{
-		Description: "Multiple Login Failures for admin",
-		Severity:    models.SeverityHigh,
-		Categories:  []string{"Authentication", "User Login Failure"},
-		CreatedAt:   epochMsToTime(1709308800000),
-		SourceIPs:   []string{"10.0.0.5"},
-		Source:      "10.0.0.5",
+func TestMapOffenseToAlert_ImportTemplate(t *testing.T) {
+	offense := QRadarOffense{
+		ID:              77,
+		Description:     "Multiple Login Failures for admin",
+		Severity:        6,
+		Status:          "OPEN",
+		Magnitude:       5,
+		OffenseSource:   "10.0.0.5",
+		StartTime:       1709337600000, // 2024-03-02T00:00:00Z: 2024-03-01 west of UTC
+		LastUpdatedTime: 1709395200000,
+		Categories:      []string{"Authentication", "User Login Failure"},
 	}
 
-	template := AlertToImportTemplate(alert)
+	template := mapping.AlertToImportTemplate(MapOffenseToAlert(offense))
 
+	if template.ExternalID != "qradar-offense-77" {
+		t.Errorf("ExternalID = %q, want qradar-offense-77", template.ExternalID)
+	}
 	if template.Severity != "high" {
 		t.Errorf("Severity = %q, want high", template.Severity)
 	}
-	if template.AlertDate != "2024-03-01" {
-		t.Errorf("AlertDate = %q, want 2024-03-01", template.AlertDate)
+	// The date is taken in UTC regardless of the host time zone.
+	if template.AlertDate != "2024-03-02" {
+		t.Errorf("AlertDate = %q, want 2024-03-02", template.AlertDate)
 	}
-	if template.SourceIP != "10.0.0.5" {
-		t.Errorf("SourceIP = %q, want 10.0.0.5", template.SourceIP)
+	if template.SourceIP != "10.0.0.5" || template.AssetName != "10.0.0.5" {
+		t.Errorf("SourceIP/AssetName = %q/%q, want 10.0.0.5", template.SourceIP, template.AssetName)
 	}
-	// Should extract MITRE from "Authentication" category
-	if template.TechniqueID != "T1110" {
-		t.Errorf("TechniqueID = %q, want T1110", template.TechniqueID)
+	// Should extract MITRE from the "Authentication" category
+	if template.TechniqueID != "T1110" || template.Tactic != "credential_access" {
+		t.Errorf("technique/tactic = %q/%q, want T1110/credential_access", template.TechniqueID, template.Tactic)
 	}
-	if template.ImpactType != "credential_access" {
-		t.Errorf("ImpactType = %q, want credential_access", template.ImpactType)
+	if template.ImpactType != "" {
+		t.Errorf("ImpactType = %q, want empty (resolved by the platform)", template.ImpactType)
+	}
+	if template.RawData["source"] != "qradar" || template.RawData["status"] != "OPEN" || template.RawData["offenseId"] != int64(77) {
+		t.Errorf("RawData = %v", template.RawData)
 	}
 }

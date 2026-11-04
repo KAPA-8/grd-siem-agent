@@ -5,3 +5,6 @@ config.yaml
 .grd-agent-checkpoint
 coverage.out
 *.exe
+.grd-agent-checkpoint-*
+.DS_Store
+.claude/

@@ -10,7 +10,9 @@ import (
 
 	"github.com/grd-platform/grd-siem-agent/internal/collector"
 	"github.com/grd-platform/grd-siem-agent/internal/config"
+	"github.com/grd-platform/grd-siem-agent/internal/mapping"
 	"github.com/grd-platform/grd-siem-agent/internal/models"
+	"github.com/grd-platform/grd-siem-agent/internal/siemhttp"
 )
 
 // Ensure QRadarCollector implements collector.Collector at compile time.
@@ -18,19 +20,28 @@ var _ collector.Collector = (*QRadarCollector)(nil)
 
 // QRadarCollector implements the Collector interface for IBM QRadar.
 type QRadarCollector struct {
-	client      *Client
-	syncCfg     config.SyncConfig
-	lookbackMs  int64
-	fetchNotes  bool
+	client     *Client
+	syncCfg    config.SyncConfig
+	lookbackMs int64
+	fetchNotes bool
 }
 
-// NewCollector creates a new QRadar collector.
-func NewCollector(siemCfg config.SIEMConfig, syncCfg config.SyncConfig) *QRadarCollector {
-	client := NewClient(
+// NewCollector creates a new QRadar collector. It fails when the configured
+// ca_cert_file cannot be loaded.
+func NewCollector(siemCfg config.SIEMConfig, syncCfg config.SyncConfig) (*QRadarCollector, error) {
+	httpClient, err := siemhttp.NewClient(siemhttp.Options{
+		InsecureSkipVerify: !siemCfg.Credentials.ValidateSSL,
+		CAFile:             siemCfg.Credentials.CACertFile,
+		Timeout:            httpTimeout,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("qradar: %w", err)
+	}
+	client := newClientWithHTTP(
 		siemCfg.APIURL,
 		siemCfg.Credentials.APIKey,
-		siemCfg.Credentials.ValidateSSL,
 		siemCfg.Credentials.APIVersion,
+		httpClient,
 	)
 
 	lookbackMs := time.Duration(syncCfg.LookbackDays) * 24 * time.Hour
@@ -40,7 +51,7 @@ func NewCollector(siemCfg config.SIEMConfig, syncCfg config.SyncConfig) *QRadarC
 		syncCfg:    syncCfg,
 		lookbackMs: lookbackMs.Milliseconds(),
 		fetchNotes: true,
-	}
+	}, nil
 }
 
 func (c *QRadarCollector) Name() string {
@@ -71,9 +82,12 @@ func (c *QRadarCollector) Init(ctx context.Context) error {
 	return nil
 }
 
-// Collect fetches offenses updated since the checkpoint,
-// normalizes them, and returns the new checkpoint.
-func (c *QRadarCollector) Collect(ctx context.Context, checkpoint string) ([]models.Alert, string, error) {
+// Collect fetches offenses updated since the checkpoint, converts them to the
+// platform format and returns the new checkpoint. The query window is
+// (checkpoint or lookback start, now].
+func (c *QRadarCollector) Collect(ctx context.Context, checkpoint string) (collector.Batch, error) {
+	now := time.Now()
+
 	// Determine the epoch_ms threshold
 	var sinceMs int64
 	if checkpoint != "" {
@@ -104,15 +118,21 @@ func (c *QRadarCollector) Collect(ctx context.Context, checkpoint string) ([]mod
 		Int("max_alerts", c.syncCfg.MaxAlertsPerSync).
 		Msg("collecting offenses from QRadar")
 
+	batch := collector.Batch{
+		Checkpoint: checkpoint,
+		WindowFrom: time.UnixMilli(sinceMs).UTC(),
+		WindowTo:   now.UTC(),
+	}
+
 	// Fetch offenses
 	offenses, err := c.client.GetOffenses(ctx, filter, c.syncCfg.MaxAlertsPerSync)
 	if err != nil {
-		return nil, checkpoint, fmt.Errorf("fetching offenses: %w", err)
+		return collector.Batch{}, fmt.Errorf("fetching offenses: %w", err)
 	}
 
 	if len(offenses) == 0 {
 		log.Info().Msg("no new offenses found")
-		return nil, checkpoint, nil
+		return batch, nil
 	}
 
 	// Map offenses to normalized alerts
@@ -142,17 +162,18 @@ func (c *QRadarCollector) Collect(ctx context.Context, checkpoint string) ([]mod
 		}
 	}
 
-	newCheckpoint := checkpoint
 	if maxUpdatedTime > 0 {
-		newCheckpoint = strconv.FormatInt(maxUpdatedTime, 10)
+		batch.Checkpoint = strconv.FormatInt(maxUpdatedTime, 10)
 	}
+	batch.Templates = mapping.AlertsToImportTemplates(alerts)
+	batch.Fetched = len(offenses)
 
 	log.Info().
 		Int("alerts_collected", len(alerts)).
-		Str("new_checkpoint", newCheckpoint).
+		Str("new_checkpoint", batch.Checkpoint).
 		Msg("collection complete")
 
-	return alerts, newCheckpoint, nil
+	return batch, nil
 }
 
 // HealthCheck verifies QRadar connectivity.
@@ -193,7 +214,11 @@ func severityToQRadarMin(severity string) int {
 
 // init registers the QRadar collector in the collector registry.
 func init() {
-	collector.Register("qradar", func(cfg config.SIEMConfig, syncCfg config.SyncConfig) collector.Collector {
-		return NewCollector(cfg, syncCfg)
-	})
+	collector.Register("qradar", func(cfg config.SIEMConfig, syncCfg config.SyncConfig) (collector.Collector, error) {
+		c, err := NewCollector(cfg, syncCfg)
+		if err != nil {
+			return nil, err // an untyped nil, not a nil *QRadarCollector inside the interface
+		}
+		return c, nil
+	}, nil)
 }

@@ -2,39 +2,65 @@
 # Copy this file to config.yaml and edit with your values.
 #
 # SETUP FLOW:
-# 1. Register the agent from the GRD Dashboard
-# 2. Copy the agent_id and agent_token into this file
-# 3. Set the platform URL and SIEM connection details
+# 1. Register the agent and create the SIEM connection (mode "agent") in the GRD Dashboard
+# 2. Copy the agent_id, agent_token and connection_id into this file
+# 3. Fill in the SIEM section for your SIEM type (QRadar or Stellar Cyber, below)
 # 4. Run: grd-siem-agent validate --config config.yaml
 # 5. Run: grd-siem-agent run --config config.yaml
+#
+# Every key can be overridden with an environment variable: GRD_ + the key path in
+# upper case with dots as underscores, e.g. GRD_PLATFORM_AGENT_TOKEN or
+# GRD_SIEM_CREDENTIALS_API_KEY. This works even when the key is absent from this file,
+# so secrets can live outside it.
 
 agent:
   id: ""                                # From GRD Dashboard
   name: "GRD SIEM Agent"                # Human-readable name
   hostname: ""                          # Auto-detected if empty
 
-# Cloud platform connection
+# Cloud platform connection (https required; http only for localhost)
 platform:
   url: "https://your-platform.example.com"   # GRD platform URL
   agent_token: ""                            # Token from GRD Dashboard (or GRD_PLATFORM_AGENT_TOKEN)
 
-# SIEM connection
+# SIEM connection: IBM QRadar
 siem:
-  type: "qradar"                                   # SIEM type: qradar, splunk, sentinel
+  type: "qradar"                                   # qradar | stellar_cyber
   connection_id: ""                                # Platform connection UUID (from dashboard)
   api_url: "https://192.168.1.50"                  # QRadar console URL (internal network)
   credentials:
     api_key: "your-qradar-sec-token-here"          # QRadar SEC token (or GRD_SIEM_CREDENTIALS_API_KEY)
-    validate_ssl: false                            # Set to true if QRadar has valid SSL cert
+    validate_ssl: false                            # Set to true if QRadar has a valid SSL cert (or use ca_cert_file)
+    ca_cert_file: ""                               # Optional PEM bundle of the console's CA (with validate_ssl: true)
     api_version: "19.0"                            # QRadar API version (19.0=7.5.0 UP3, 26.0=latest)
+
+# SIEM connection: Stellar Cyber Open XDR (replace the qradar block above with this one)
+#
+# siem:
+#   type: "stellar_cyber"
+#   connection_id: ""                              # Platform connection UUID (from dashboard)
+#   api_url: "https://acme.stellarcyber.cloud"     # SaaS: https://<tenant>.stellarcyber.cloud
+#                                                  # On-prem: https://<data-processor-host> (port 443)
+#   deployment: "saas"                             # saas | onprem
+#   data_source: "alerts"                          # alerts: alert index (root All-Access token, or a
+#                                                  #   scoped key on Stellar Cyber 6.3+)
+#                                                  # cases: cases and their alerts (works with scoped keys)
+#   credentials:
+#     auth_mode: "api_token"                       # api_token: All-Access token of a root Super Admin
+#                                                  # scoped_key: user API key (Stellar Cyber 5.5+)
+#     username: "api@acme.com"                     # api_token only: the API account email (case-sensitive)
+#     api_key: ""                                  # Token or scoped key (or GRD_SIEM_CREDENTIALS_API_KEY)
+#     tenant_id: ""                                # Optional: only this tenant (cust_id)
+#     validate_ssl: true                           # On-prem only; SaaS certificates are always verified
+#     ca_cert_file: ""                             # On-prem: PEM bundle of the Data Processor's CA
 
 # Sync settings
 sync:
-  interval_minutes: 15       # How often to poll for new offenses
+  interval_minutes: 15       # How often to poll the SIEM
   lookback_days: 7           # How far back to look on first run (no checkpoint)
-  max_alerts_per_sync: 1000  # Maximum alerts per collection cycle
+  max_alerts_per_sync: 1000  # Maximum alerts per collection cycle (1..10000, sent in batches of 500)
   filters:
-    min_severity: "medium"   # Minimum severity: low, medium, high, critical, info
+    min_severity: "medium"   # Minimum severity: info, low, medium, high, critical
 
 # Local buffer (for offline resilience)
 buffer:

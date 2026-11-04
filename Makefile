@@ -11,7 +11,7 @@ LDFLAGS := -s -w \
 
 PLATFORMS := linux/amd64 linux/arm64 windows/amd64 darwin/amd64 darwin/arm64
 
-.PHONY: build run test clean build-all checksums
+.PHONY: build run test clean build-all checksums fmt fmt-check vet
 
 ## build: Build for current platform
 build:
@@ -25,13 +25,33 @@ run: build
 test:
 	go test -v -race -count=1 ./...
 
+# GO_FILES lists the Go sources, skipping dot-directories (.git, local tool dirs).
+GO_FILES = $$(find . -path './.*' -prune -o -name '*.go' -print)
+
+## fmt: Format all Go files
+fmt:
+	gofmt -w $(GO_FILES)
+
+## fmt-check: Fail if any Go file is not gofmt-formatted
+fmt-check:
+	@unformatted="$$(gofmt -l $(GO_FILES))"; \
+	if [ -n "$$unformatted" ]; then \
+		echo "These files need gofmt (run 'make fmt'):"; \
+		echo "$$unformatted"; \
+		exit 1; \
+	fi
+
+## vet: Run go vet
+vet:
+	go vet ./...
+
 ## lint: Run linter (requires golangci-lint)
 lint:
 	golangci-lint run ./...
 
 ## build-all: Cross-compile for all target platforms
 build-all:
-	@for platform in $(PLATFORMS); do \
+	@set -e; for platform in $(PLATFORMS); do \
 		os=$${platform%/*}; \
 		arch=$${platform#*/}; \
 		ext=""; \

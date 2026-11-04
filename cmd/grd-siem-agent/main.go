@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/grd-platform/grd-siem-agent/internal/agent"
+	"github.com/grd-platform/grd-siem-agent/internal/collector"
 	"github.com/grd-platform/grd-siem-agent/internal/config"
 	"github.com/grd-platform/grd-siem-agent/internal/logging"
 	"github.com/grd-platform/grd-siem-agent/internal/updater"
@@ -19,6 +20,7 @@ import (
 
 	// Register collectors via init()
 	_ "github.com/grd-platform/grd-siem-agent/internal/collector/qradar"
+	_ "github.com/grd-platform/grd-siem-agent/internal/collector/stellarcyber"
 )
 
 var configPath string
@@ -27,7 +29,7 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:   "grd-siem-agent",
 		Short: "GRD SIEM Agent - On-premises collector for SIEM integration",
-		Long:  "Collects alerts from SIEMs (QRadar, Splunk, Sentinel) and sends them to the GRD platform.",
+		Long:  "Collects alerts from SIEMs (IBM QRadar, Stellar Cyber Open XDR) and sends them to the GRD platform.",
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "config.yaml", "path to config file")
@@ -42,13 +44,29 @@ func main() {
 	}
 }
 
-// agentService wraps the Agent to implement kardianos/service.Interface
+// agentService wraps the Agent to implement kardianos/service.Interface.
+//
+// Under systemd or the Windows SCM, kardianos keeps the process alive until
+// the service manager stops it, even after the agent goroutine returned. A
+// fatal error (bad config, agent setup) must therefore end the process with a
+// non-zero code so Restart=on-failure / SCM recovery restarts it, instead of
+// leaving a "running" service that does nothing.
 type agentService struct {
+	run  func(ctx context.Context) error // the agent; runService by default
+	exit func(code int)                  // os.Exit; replaced in tests
+
+	ctx    context.Context
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
+func newAgentService() *agentService {
+	return &agentService{run: runService, exit: os.Exit}
+}
+
 func (s *agentService) Start(svc service.Service) error {
+	// Created before the goroutine starts, so Stop never races with it.
+	s.ctx, s.cancel = context.WithCancel(context.Background())
 	s.done = make(chan struct{})
 	go s.runAgent()
 	return nil
@@ -67,34 +85,45 @@ func (s *agentService) Stop(svc service.Service) error {
 func (s *agentService) runAgent() {
 	defer close(s.done)
 
+	err := s.run(s.ctx)
+	if s.ctx.Err() != nil {
+		return // stopped by the service manager
+	}
+	if err == nil {
+		err = fmt.Errorf("agent stopped unexpectedly")
+	}
+	log.Error().Err(err).Msg("agent failed; exiting so the service manager restarts it")
+	s.exit(1)
+}
+
+// runService runs the agent under the service manager.
+func runService(ctx context.Context) error {
+	return startAgent(ctx, "service")
+}
+
+// startAgent loads the configuration and runs the agent until ctx is done.
+func startAgent(ctx context.Context, mode string) error {
 	cfg, err := config.Load(configPath)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to load config")
-		return
+		return fmt.Errorf("loading config: %w", err)
 	}
 
 	if err := logging.Setup(cfg.Logging.Level, cfg.Logging.Path); err != nil {
-		log.Error().Err(err).Msg("failed to setup logging")
-		return
+		return fmt.Errorf("setting up logging: %w", err)
 	}
 
 	log.Info().
 		Str("config", configPath).
 		Str("version", version.Version).
-		Msg("GRD SIEM Agent starting (service mode)")
+		Str("mode", mode).
+		Msg("GRD SIEM Agent starting")
 
 	a, err := agent.New(cfg, configPath)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to create agent")
-		return
+		return fmt.Errorf("creating agent: %w", err)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancel = cancel
-
-	if err := a.Run(ctx); err != nil {
-		log.Error().Err(err).Msg("agent stopped with error")
-	}
+	return a.Run(ctx)
 }
 
 func runCmd() *cobra.Command {
@@ -109,7 +138,7 @@ func runCmd() *cobra.Command {
 				Description: "On-premises SIEM collector for GRD platform",
 			}
 
-			svc := &agentService{}
+			svc := newAgentService()
 			s, err := service.New(svc, svcConfig)
 			if err != nil {
 				return fmt.Errorf("creating service wrapper: %w", err)
@@ -128,29 +157,9 @@ func runCmd() *cobra.Command {
 
 // runInteractive runs the agent in foreground/console mode with signal handling.
 func runInteractive() error {
-	cfg, err := config.Load(configPath)
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-
-	if err := logging.Setup(cfg.Logging.Level, cfg.Logging.Path); err != nil {
-		return fmt.Errorf("setting up logging: %w", err)
-	}
-
-	log.Info().
-		Str("config", configPath).
-		Str("version", version.Version).
-		Msg("GRD SIEM Agent starting")
-
-	a, err := agent.New(cfg, configPath)
-	if err != nil {
-		return fmt.Errorf("creating agent: %w", err)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	return a.Run(ctx)
+	return startAgent(ctx, "console")
 }
 
 func validateCmd() *cobra.Command {
@@ -162,21 +171,43 @@ func validateCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("config validation failed: %w", err)
 			}
+			// Building the collector also checks files it needs (ca_cert_file).
+			coll, err := collector.New(cfg.SIEM, cfg.Sync)
+			if err != nil {
+				return fmt.Errorf("config validation failed: %w", err)
+			}
+			_ = coll.Close()
 
-			fmt.Printf("Config is valid.\n")
-			fmt.Printf("  Agent ID:      %s\n", cfg.Agent.ID)
-			fmt.Printf("  Agent Name:    %s\n", cfg.Agent.Name)
-			fmt.Printf("  SIEM Type:     %s\n", cfg.SIEM.Type)
-			fmt.Printf("  SIEM URL:      %s\n", cfg.SIEM.APIURL)
-			fmt.Printf("  Connection ID: %s\n", cfg.SIEM.ConnectionID)
-			fmt.Printf("  Platform:      %s\n", cfg.Platform.URL)
-			fmt.Printf("  Interval:      %d minutes\n", cfg.Sync.IntervalMinutes)
-			fmt.Printf("  Lookback:      %d days\n", cfg.Sync.LookbackDays)
-			fmt.Printf("  Buffer:        %v (%s)\n", cfg.Buffer.Enabled, cfg.Buffer.Path)
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "Config is valid.\n")
+			fmt.Fprintf(out, "  Agent ID:      %s\n", cfg.Agent.ID)
+			fmt.Fprintf(out, "  Agent Name:    %s\n", cfg.Agent.Name)
+			fmt.Fprintf(out, "  SIEM Type:     %s\n", cfg.SIEM.Type)
+			fmt.Fprintf(out, "  SIEM URL:      %s\n", cfg.SIEM.APIURL)
+			if cfg.SIEM.Type == "stellar_cyber" {
+				fmt.Fprintf(out, "  Deployment:    %s\n", orDefault(cfg.SIEM.Deployment, "saas"))
+				fmt.Fprintf(out, "  Data source:   %s\n", orDefault(cfg.SIEM.DataSource, "alerts"))
+				fmt.Fprintf(out, "  Auth mode:     %s\n", orDefault(cfg.SIEM.Credentials.AuthMode, "api_token"))
+				fmt.Fprintf(out, "  Tenant:        %s\n", orDefault(cfg.SIEM.Credentials.TenantID, "(all)"))
+			}
+			fmt.Fprintf(out, "  Connection ID: %s\n", cfg.SIEM.ConnectionID)
+			fmt.Fprintf(out, "  Platform:      %s\n", cfg.Platform.URL)
+			fmt.Fprintf(out, "  Interval:      %d minutes\n", cfg.Sync.IntervalMinutes)
+			fmt.Fprintf(out, "  Lookback:      %d days\n", cfg.Sync.LookbackDays)
+			fmt.Fprintf(out, "  Max alerts:    %d per cycle\n", cfg.Sync.MaxAlertsPerSync)
+			fmt.Fprintf(out, "  Buffer:        %v (%s)\n", cfg.Buffer.Enabled, cfg.Buffer.Path)
+			fmt.Fprintf(out, "  Checkpoint:    %s\n", config.CheckpointPath(cfg))
 
 			return nil
 		},
 	}
+}
+
+func orDefault(value, fallback string) string {
+	if value == "" {
+		return fallback
+	}
+	return value
 }
 
 func versionCmd() *cobra.Command {

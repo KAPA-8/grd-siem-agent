@@ -3,41 +3,41 @@ package qradar
 // QRadarOffense represents the raw API response from QRadar's /siem/offenses endpoint.
 // Field names match the QRadar REST API v19.0 schema.
 type QRadarOffense struct {
-	ID                         int64            `json:"id"`
-	Description                string           `json:"description"`
-	AssignedTo                 string           `json:"assigned_to"`
-	Categories                 []string         `json:"categories"`
-	CategoryCount              int              `json:"category_count"`
-	CloseTime                  *int64           `json:"close_time"`
-	ClosingUser                string           `json:"closing_user"`
-	ClosingReasonID            *int64           `json:"closing_reason_id"`
-	Credibility                int              `json:"credibility"`
-	Relevance                  int              `json:"relevance"`
-	Severity                   int              `json:"severity"`
-	Magnitude                  int              `json:"magnitude"`
-	DestinationNetworks        []string         `json:"destination_networks"`
-	SourceNetwork              string           `json:"source_network"`
-	DeviceCount                int              `json:"device_count"`
-	EventCount                 int64            `json:"event_count"`
-	FlowCount                  int64            `json:"flow_count"`
-	Inactive                   bool             `json:"inactive"`
-	LastUpdatedTime            int64            `json:"last_updated_time"`
-	OffenseSource              string           `json:"offense_source"`
-	OffenseType                int              `json:"offense_type"`
-	Protected                  bool             `json:"protected"`
-	FollowUp                   bool             `json:"follow_up"`
-	SourceCount                int              `json:"source_count"`
-	StartTime                  int64            `json:"start_time"`
-	Status                     string           `json:"status"` // OPEN, HIDDEN, CLOSED
-	UsernameCount              int              `json:"username_count"`
-	SourceAddressIDs           []int64          `json:"source_address_ids"`
-	LocalDestinationAddressIDs []int64          `json:"local_destination_address_ids"`
-	LocalDestinationCount      int              `json:"local_destination_count"`
-	RemoteDestinationCount     int              `json:"remote_destination_count"`
-	DomainID                   *int64           `json:"domain_id"`
-	LastPersistedTime          int64            `json:"last_persisted_time"`
-	FirstPersistedTime         int64            `json:"first_persisted_time"`
-	Rules                      []QRadarRule     `json:"rules"`
+	ID                         int64             `json:"id"`
+	Description                string            `json:"description"`
+	AssignedTo                 string            `json:"assigned_to"`
+	Categories                 []string          `json:"categories"`
+	CategoryCount              int               `json:"category_count"`
+	CloseTime                  *int64            `json:"close_time"`
+	ClosingUser                string            `json:"closing_user"`
+	ClosingReasonID            *int64            `json:"closing_reason_id"`
+	Credibility                int               `json:"credibility"`
+	Relevance                  int               `json:"relevance"`
+	Severity                   int               `json:"severity"`
+	Magnitude                  int               `json:"magnitude"`
+	DestinationNetworks        []string          `json:"destination_networks"`
+	SourceNetwork              string            `json:"source_network"`
+	DeviceCount                int               `json:"device_count"`
+	EventCount                 int64             `json:"event_count"`
+	FlowCount                  int64             `json:"flow_count"`
+	Inactive                   bool              `json:"inactive"`
+	LastUpdatedTime            int64             `json:"last_updated_time"`
+	OffenseSource              string            `json:"offense_source"`
+	OffenseType                int               `json:"offense_type"`
+	Protected                  bool              `json:"protected"`
+	FollowUp                   bool              `json:"follow_up"`
+	SourceCount                int               `json:"source_count"`
+	StartTime                  int64             `json:"start_time"`
+	Status                     string            `json:"status"` // OPEN, HIDDEN, CLOSED
+	UsernameCount              int               `json:"username_count"`
+	SourceAddressIDs           []int64           `json:"source_address_ids"`
+	LocalDestinationAddressIDs []int64           `json:"local_destination_address_ids"`
+	LocalDestinationCount      int               `json:"local_destination_count"`
+	RemoteDestinationCount     int               `json:"remote_destination_count"`
+	DomainID                   *int64            `json:"domain_id"`
+	LastPersistedTime          int64             `json:"last_persisted_time"`
+	FirstPersistedTime         int64             `json:"first_persisted_time"`
+	Rules                      []QRadarRule      `json:"rules"`
 	LogSources                 []QRadarLogSource `json:"log_sources"`
 }
 

@@ -1,0 +1,214 @@
+[
+  {
+    "externalId": "a1-phishing-critical",
+    "techniqueId": "T1566",
+    "techniqueName": "Phishing",
+    "description": "Proofpoint TAP messagesBlocked: Phishing",
+    "alertDate": "2026-10-28",
+    "severity": "critical",
+    "sourceIp": "203.0.113.10",
+    "destinationIp": "10.0.0.5",
+    "assetName": "mail-gw-01",
+    "tactic": "TA0001",
+    "rawData": {
+      "source": "stellar_cyber",
+      "index": "stellar-index-v1-ser-org1-tenantA-2026.10.28-000001",
+      "tenantId": "tenantA",
+      "tenantName": "Acme",
+      "eventScore": 85,
+      "severity": 80,
+      "fidelity": 90,
+      "threatScore": 70,
+      "status": "New",
+      "writeTime": 1793196390000,
+      "eventName": "proofpoint_tap-messagesblocked-initial_access-phishing",
+      "killchainStage": "Initial Attempts",
+      "tactic": {
+        "id": "TA0001",
+        "name": "Initial Access"
+      },
+      "technique": {
+        "id": "T1566",
+        "name": "Phishing"
+      }
+    }
+  },
+  {
+    "externalId": "a2-bruteforce-subtech",
+    "techniqueId": "T1110.001",
+    "techniqueName": "Password Guessing",
+    "description": "Password Guessing Burst",
+    "alertDate": "2026-10-28",
+    "severity": "high",
+    "sourceIp": "198.51.100.7",
+    "destinationIp": "10.0.0.20",
+    "assetName": "dc-01",
+    "tactic": "TA0006",
+    "rawData": {
+      "source": "stellar_cyber",
+      "index": "stellar-index-v1-ser-org1-tenantA-2026.10.28-000001",
+      "tenantId": "tenantA",
+      "tenantName": "Acme",
+      "eventScore": 65.5,
+      "status": "In Progress",
+      "writeTime": 1793156460000,
+      "eventName": "login_failure_burst",
+      "tactic": {
+        "id": "TA0006",
+        "name": "Credential Access"
+      },
+      "technique": {
+        "id": "t1110.001",
+        "name": "Password Guessing"
+      }
+    }
+  },
+  {
+    "externalId": "a3-xdr-malware",
+    "techniqueId": "XT3001",
+    "techniqueName": "Malware Detected",
+    "description": "Malware on Disk",
+    "alertDate": "2026-10-27",
+    "severity": "medium",
+    "sourceIp": "10.1.1.4",
+    "assetName": "ws-042",
+    "tactic": "XTA0006",
+    "rawData": {
+      "source": "stellar_cyber",
+      "index": "stellar-index-v1-ser-org1-tenantB-2026.10.27-000002",
+      "tenantId": "tenantB",
+      "tenantName": "Beta",
+      "eventScore": 45,
+      "status": "New",
+      "writeTime": 1793102405000,
+      "eventName": "malware_on_disk",
+      "tactic": {
+        "id": "XTA0006",
+        "name": "XDR Malware"
+      },
+      "technique": {
+        "id": "XT3001",
+        "name": "Malware Detected"
+      }
+    }
+  },
+  {
+    "externalId": "a4-ttps-only",
+    "techniqueId": "T1041",
+    "techniqueName": "Exfiltration Over C2 Channel",
+    "description": "Data Exfiltration Over C2",
+    "alertDate": "2026-10-26",
+    "severity": "low",
+    "sourceIp": "10.0.0.8",
+    "destinationIp": "192.0.2.44",
+    "assetName": "fileserver-02",
+    "tactic": "TA0010",
+    "rawData": {
+      "source": "stellar_cyber",
+      "index": "stellar-index-v1-ser-org1-tenantA-2026.10.26-000003",
+      "tenantId": "tenantA",
+      "eventScore": 30,
+      "status": "Closed",
+      "writeTime": 1793003460000,
+      "eventName": "exfil_over_c2",
+      "tactic": {
+        "id": "TA0010",
+        "name": "Exfiltration"
+      },
+      "technique": {
+        "id": "T1041",
+        "name": "Exfiltration Over C2 Channel"
+      }
+    }
+  },
+  {
+    "externalId": "a5-no-mitre-iso-ts",
+    "techniqueId": "T0000",
+    "description": "Uncommon Process Anomaly",
+    "alertDate": "2026-10-25",
+    "severity": "info",
+    "rawData": {
+      "source": "stellar_cyber",
+      "index": "stellar-index-v1-ser-org1-tenantA-2026.10.25-000004",
+      "tenantId": "tenantA",
+      "severity": 10,
+      "status": "New",
+      "writeTime": 1792923360000
+    }
+  },
+  {
+    "externalId": "a6-ignored-midnight",
+    "techniqueId": "T1046",
+    "techniqueName": "Network Service Discovery",
+    "description": "Port Scan",
+    "alertDate": "2026-10-29",
+    "severity": "critical",
+    "sourceIp": "10.0.0.9",
+    "tactic": "TA0007",
+    "rawData": {
+      "source": "stellar_cyber",
+      "index": "stellar-index-v1-ser-org1-tenantA-2026.10.29-000005",
+      "tenantId": "tenantA",
+      "eventScore": 80,
+      "status": "Ignored",
+      "writeTime": 1793318410000,
+      "tactic": {
+        "id": "TA0007",
+        "name": "Discovery"
+      },
+      "technique": {
+        "id": "T1046",
+        "name": "Network Service Discovery"
+      }
+    }
+  },
+  {
+    "externalId": "a7-boundary-79",
+    "techniqueId": "T1486",
+    "techniqueName": "Data Encrypted for Impact",
+    "description": "Ransomware Behaviour",
+    "alertDate": "2026-10-29",
+    "severity": "high",
+    "tactic": "TA0040",
+    "rawData": {
+      "source": "stellar_cyber",
+      "index": "stellar-index-v1-ser-org1-tenantA-2026.10.29-000005",
+      "tenantId": "tenantA",
+      "eventScore": 79.99,
+      "status": "New",
+      "writeTime": 1793232001000,
+      "tactic": {
+        "id": "TA0040",
+        "name": "Impact"
+      },
+      "technique": {
+        "id": "T1486",
+        "name": "Data Encrypted for Impact"
+      }
+    }
+  },
+  {
+    "externalId": "a8-boundary-19",
+    "techniqueId": "T0000",
+    "techniqueName": "Protocol Tunneling",
+    "description": "dns_tunnel_suspect",
+    "alertDate": "2026-10-29",
+    "severity": "info",
+    "tactic": "Command and Control",
+    "rawData": {
+      "source": "stellar_cyber",
+      "index": "stellar-index-v1-ser-org1-tenantA-2026.10.29-000005",
+      "tenantId": "tenantA",
+      "eventScore": 19.99,
+      "fidelity": 10,
+      "writeTime": 1793253601000,
+      "eventName": "dns_tunnel_suspect",
+      "tactic": {
+        "name": "Command and Control"
+      },
+      "technique": {
+        "name": "Protocol Tunneling"
+      }
+    }
+  }
+]

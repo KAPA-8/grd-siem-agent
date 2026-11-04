@@ -1,9 +1,14 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -33,16 +38,22 @@ type PlatformConfig struct {
 }
 
 type SIEMConfig struct {
-	Type         string           `mapstructure:"type"`
-	APIURL       string           `mapstructure:"api_url"`
+	Type         string           `mapstructure:"type"`          // registered collector: qradar | stellar_cyber
+	APIURL       string           `mapstructure:"api_url"`       // SIEM API base URL
 	ConnectionID string           `mapstructure:"connection_id"` // Platform connection UUID
+	Deployment   string           `mapstructure:"deployment"`    // stellar_cyber: saas (default) | onprem
+	DataSource   string           `mapstructure:"data_source"`   // stellar_cyber: alerts (default) | cases
 	Credentials  CredentialConfig `mapstructure:"credentials"`
 }
 
 type CredentialConfig struct {
-	APIKey      string `mapstructure:"api_key"`
-	ValidateSSL bool   `mapstructure:"validate_ssl"`
-	APIVersion  string `mapstructure:"api_version"` // QRadar API version (default: "19.0")
+	Username    string `mapstructure:"username"`     // stellar_cyber api_token mode: account email (case-sensitive)
+	APIKey      string `mapstructure:"api_key"`      // QRadar SEC token / Stellar Cyber API token or scoped key
+	AuthMode    string `mapstructure:"auth_mode"`    // stellar_cyber: api_token (default) | scoped_key
+	TenantID    string `mapstructure:"tenant_id"`    // stellar_cyber: optional tenant (cust_id) filter
+	ValidateSSL bool   `mapstructure:"validate_ssl"` // verify the SIEM certificate (always on for Stellar Cyber SaaS)
+	CACertFile  string `mapstructure:"ca_cert_file"` // optional PEM bundle trusted in addition to the system roots
+	APIVersion  string `mapstructure:"api_version"`  // QRadar API version (default: "19.0")
 }
 
 type SyncConfig struct {
@@ -80,39 +91,45 @@ type UpdateConfig struct {
 	AllowPrerelease      bool   `mapstructure:"allow_prerelease"`
 }
 
+// siemValidator validates the siem section against the collector registry.
+// The collector package installs it from its init(); config cannot import the
+// registry directly because collectors depend on config.
+var siemValidator func(SIEMConfig) error
+
+// SetSIEMValidator installs the function that validates siem.type and the
+// type-specific settings. Called by the collector registry at init.
+func SetSIEMValidator(fn func(SIEMConfig) error) {
+	siemValidator = fn
+}
+
+// EnvPrefix is the prefix of the environment variables that override
+// configuration keys: platform.agent_token -> GRD_PLATFORM_AGENT_TOKEN.
+const EnvPrefix = "GRD"
+
+// EnvVarName returns the environment variable that overrides a key.
+func EnvVarName(key string) string {
+	return EnvPrefix + "_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
+}
+
 // Load reads the configuration from the given YAML file path,
 // applies defaults, binds environment variables, and validates.
 func Load(path string) (*Config, error) {
-	v := viper.New()
-
-	setDefaults(v)
-
-	v.SetConfigFile(path)
-	v.SetConfigType("yaml")
-
-	// Bind environment variables with GRD_ prefix
-	v.SetEnvPrefix("GRD")
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	v.AutomaticEnv()
-
-	if err := v.ReadInConfig(); err != nil {
-		return nil, fmt.Errorf("reading config file: %w", err)
+	cfg, err := read(path)
+	if err != nil {
+		return nil, err
 	}
-
-	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
-		return nil, fmt.Errorf("parsing config: %w", err)
-	}
-
-	if err := validate(&cfg); err != nil {
+	if err := validate(cfg); err != nil {
 		return nil, fmt.Errorf("config validation: %w", err)
 	}
-
-	return &cfg, nil
+	return cfg, nil
 }
 
-// LoadMinimal loads config with minimal validation (for register command).
+// LoadMinimal loads config without run-mode validation (for the update command).
 func LoadMinimal(path string) (*Config, error) {
+	return read(path)
+}
+
+func read(path string) (*Config, error) {
 	v := viper.New()
 
 	setDefaults(v)
@@ -120,9 +137,9 @@ func LoadMinimal(path string) (*Config, error) {
 	v.SetConfigFile(path)
 	v.SetConfigType("yaml")
 
-	v.SetEnvPrefix("GRD")
-	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	v.AutomaticEnv()
+	if err := bindEnv(v); err != nil {
+		return nil, err
+	}
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("reading config file: %w", err)
@@ -132,47 +149,212 @@ func LoadMinimal(path string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
 	}
-
+	normalize(&cfg)
 	return &cfg, nil
 }
 
-// CheckpointPath returns the path to the checkpoint file.
-// It uses the buffer directory (writable by grd-agent) instead of the config
-// directory (which is typically read-only /etc/grd-siem-agent/).
-func CheckpointPath(cfg *Config) string {
-	if cfg.Buffer.Path != "" {
-		return filepath.Join(filepath.Dir(cfg.Buffer.Path), ".grd-agent-checkpoint")
-	}
-	return filepath.Join(os.TempDir(), ".grd-agent-checkpoint")
-}
-
-// validate checks that all required fields are set for run mode.
-func validate(cfg *Config) error {
-	if cfg.Platform.URL == "" {
-		return fmt.Errorf("platform.url is required")
-	}
-	if cfg.Platform.AgentToken == "" {
-		if os.Getenv("GRD_PLATFORM_AGENT_TOKEN") == "" {
-			return fmt.Errorf("platform.agent_token is required (or set GRD_PLATFORM_AGENT_TOKEN). Run 'grd-siem-agent register' first")
+// bindEnv binds every configuration key to its GRD_ environment variable.
+// viper's AutomaticEnv alone only applies to keys it already knows from the
+// file or a default, so a secret set only in the environment (for example
+// GRD_PLATFORM_AGENT_TOKEN with no agent_token key in the YAML) was ignored.
+func bindEnv(v *viper.Viper) error {
+	for _, key := range Keys() {
+		if err := v.BindEnv(key, EnvVarName(key)); err != nil {
+			return fmt.Errorf("binding %s: %w", EnvVarName(key), err)
 		}
 	}
-	if cfg.SIEM.Type == "" {
-		return fmt.Errorf("siem.type is required")
-	}
-
-	validSIEMTypes := map[string]bool{"qradar": true, "splunk": true, "sentinel": true}
-	if !validSIEMTypes[cfg.SIEM.Type] {
-		return fmt.Errorf("siem.type must be one of: qradar, splunk, sentinel (got: %s)", cfg.SIEM.Type)
-	}
-
-	if cfg.Sync.IntervalMinutes < 1 {
-		return fmt.Errorf("sync.interval_minutes must be >= 1")
-	}
-
-	// SIEM URL and credentials can come from remote config, so only warn
-	if cfg.SIEM.APIURL == "" && cfg.SIEM.ConnectionID == "" {
-		return fmt.Errorf("either siem.api_url or siem.connection_id is required")
-	}
-
 	return nil
+}
+
+// Keys returns every configuration key (e.g. "siem.credentials.api_key"),
+// derived from the mapstructure tags of Config so new keys are never missed.
+func Keys() []string {
+	return keysOf(reflect.TypeOf(Config{}), "")
+}
+
+func keysOf(t reflect.Type, prefix string) []string {
+	var keys []string
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		tag := strings.Split(field.Tag.Get("mapstructure"), ",")[0]
+		if tag == "" || tag == "-" {
+			continue
+		}
+		key := tag
+		if prefix != "" {
+			key = prefix + "." + tag
+		}
+		if field.Type.Kind() == reflect.Struct {
+			keys = append(keys, keysOf(field.Type, key)...)
+		} else {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// normalize trims values where stray whitespace (a newline at the end of an
+// environment variable or a pasted token) would break requests.
+func normalize(cfg *Config) {
+	for _, s := range []*string{
+		&cfg.Platform.URL,
+		&cfg.Platform.AgentToken,
+		&cfg.SIEM.Type,
+		&cfg.SIEM.APIURL,
+		&cfg.SIEM.ConnectionID,
+		&cfg.SIEM.Deployment,
+		&cfg.SIEM.DataSource,
+		&cfg.SIEM.Credentials.Username,
+		&cfg.SIEM.Credentials.APIKey,
+		&cfg.SIEM.Credentials.AuthMode,
+		&cfg.SIEM.Credentials.TenantID,
+		&cfg.SIEM.Credentials.CACertFile,
+		&cfg.Sync.Filters.MinSeverity,
+	} {
+		*s = strings.TrimSpace(*s)
+	}
+	cfg.SIEM.Type = strings.ToLower(cfg.SIEM.Type)
+	cfg.Sync.Filters.MinSeverity = strings.ToLower(cfg.Sync.Filters.MinSeverity)
+}
+
+// checkpointFilePrefix is the checkpoint file name; the per-connection file
+// appends "-<connection_id>".
+const checkpointFilePrefix = ".grd-agent-checkpoint"
+
+// CheckpointPath returns the checkpoint file for the configured connection:
+// <buffer dir>/.grd-agent-checkpoint-<connection_id>. It lives next to the
+// buffer (writable by grd-agent) instead of the config directory (typically
+// read-only /etc/grd-siem-agent/). One file per connection means a changed
+// connection never resumes from another connection's checkpoint.
+func CheckpointPath(cfg *Config) string {
+	return filepath.Join(checkpointDir(cfg), checkpointFilePrefix+"-"+safeFileName(cfg.SIEM.ConnectionID))
+}
+
+// LegacyCheckpointPath is the single checkpoint file used by older agents.
+// It is read once when the per-connection file does not exist yet.
+func LegacyCheckpointPath(cfg *Config) string {
+	return filepath.Join(checkpointDir(cfg), checkpointFilePrefix)
+}
+
+func checkpointDir(cfg *Config) string {
+	if cfg.Buffer.Path != "" {
+		return filepath.Dir(cfg.Buffer.Path)
+	}
+	return os.TempDir()
+}
+
+// safeFileName keeps letters, digits, '-' and '_' (a UUID is unchanged).
+func safeFileName(s string) string {
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	if b.Len() == 0 {
+		return "default"
+	}
+	return b.String()
+}
+
+// MaxAlertsPerSyncLimit is the upper bound of sync.max_alerts_per_sync (the
+// Stellar Cyber search window; the agent posts them in chunks of 500).
+const MaxAlertsPerSyncLimit = 10000
+
+var (
+	uuidPattern     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+	validSeverities = map[string]bool{"": true, "info": true, "low": true, "medium": true, "high": true, "critical": true}
+)
+
+// validate checks that all required fields are set for run mode. It reports
+// every problem at once.
+func validate(cfg *Config) error {
+	var errs []error
+	add := func(format string, args ...any) { errs = append(errs, fmt.Errorf(format, args...)) }
+
+	if cfg.Platform.URL == "" {
+		add("platform.url is required")
+	} else if err := validatePlatformURL(cfg.Platform.URL); err != nil {
+		errs = append(errs, err)
+	}
+	if cfg.Platform.AgentToken == "" {
+		add("platform.agent_token is required (or set %s); copy it from the GRD Dashboard", EnvVarName("platform.agent_token"))
+	}
+
+	errsBeforeSIEM := len(errs)
+	if cfg.SIEM.Type == "" {
+		add("siem.type is required")
+	}
+	if cfg.SIEM.ConnectionID == "" {
+		add("siem.connection_id is required (the connection UUID from the GRD Dashboard)")
+	} else if !uuidPattern.MatchString(cfg.SIEM.ConnectionID) {
+		add("siem.connection_id must be a UUID (got %q)", cfg.SIEM.ConnectionID)
+	}
+	if cfg.SIEM.APIURL == "" {
+		add("siem.api_url is required")
+	}
+	if cfg.SIEM.Credentials.APIKey == "" {
+		add("siem.credentials.api_key is required (or set %s)", EnvVarName("siem.credentials.api_key"))
+	}
+	// Type-specific checks (and the registry lookup) once the basics are set.
+	if len(errs) == errsBeforeSIEM && siemValidator != nil {
+		if err := siemValidator(cfg.SIEM); err != nil {
+			errs = append(errs, err)
+		}
+	}
+
+	if cfg.Sync.IntervalMinutes <= 0 {
+		add("sync.interval_minutes must be greater than 0")
+	}
+	if cfg.Sync.LookbackDays <= 0 {
+		add("sync.lookback_days must be greater than 0")
+	}
+	if cfg.Sync.MaxAlertsPerSync < 1 || cfg.Sync.MaxAlertsPerSync > MaxAlertsPerSyncLimit {
+		add("sync.max_alerts_per_sync must be between 1 and %d (got %d)", MaxAlertsPerSyncLimit, cfg.Sync.MaxAlertsPerSync)
+	}
+	if !validSeverities[cfg.Sync.Filters.MinSeverity] {
+		add("sync.filters.min_severity must be one of info, low, medium, high, critical (got %q)", cfg.Sync.Filters.MinSeverity)
+	}
+
+	if cfg.Heartbeat.IntervalSeconds <= 0 {
+		add("heartbeat.interval_seconds must be greater than 0")
+	}
+	if cfg.Update.CheckIntervalMinutes < 0 || cfg.Update.CheckIntervalHours < 0 {
+		add("update.check_interval_minutes and update.check_interval_hours cannot be negative")
+	} else if cfg.Update.Enabled && cfg.Update.CheckIntervalMinutes == 0 && cfg.Update.CheckIntervalHours == 0 {
+		add("update.check_interval_minutes (or check_interval_hours) must be greater than 0 when update.enabled is true")
+	}
+
+	if cfg.Buffer.Enabled && strings.TrimSpace(cfg.Buffer.Path) == "" {
+		add("buffer.path is required when buffer.enabled is true")
+	}
+
+	return errors.Join(errs...)
+}
+
+// validatePlatformURL requires https, except for a local platform
+// (localhost or a loopback address) during development.
+func validatePlatformURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Hostname() == "" {
+		return fmt.Errorf("platform.url %q is not a valid URL", raw)
+	}
+	switch u.Scheme {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+		return fmt.Errorf("platform.url must use https; http is only allowed for localhost (got %q)", raw)
+	default:
+		return fmt.Errorf("platform.url must use https (got %q)", raw)
+	}
 }

@@ -1,0 +1,681 @@
+{
+  "description": "Casos límite del mapeo Stellar Cyber (fechas, _id, _index). \"expected\" es la salida real de MapHit del agente Go (internal/collector/stellarcyber/mapper.go, rama feat/stellar-cyber-collector); null = el agente descarta el hit. El mapper TS debe producir exactamente lo mismo.",
+  "cases": [
+    {
+      "name": "timestamp negativo → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e01",
+        "_source": {
+          "timestamp": -1000,
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e01",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "string de epoch negativo → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e02",
+        "_source": {
+          "timestamp": "-1000",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e02",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "string de epoch con decimales → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e03",
+        "_source": {
+          "timestamp": "1793000000000.5",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e03",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "número de epoch con decimales → se trunca",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e04",
+        "_source": {
+          "timestamp": 1793318399999.9
+        }
+      },
+      "expected": {
+        "externalId": "e04",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-29",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "string de epoch con ceros a la izquierda",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e05",
+        "_source": {
+          "timestamp": "0001793000000000"
+        }
+      },
+      "expected": {
+        "externalId": "e05",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-26",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "epoch por encima de 9999-12-31 → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e06",
+        "_source": {
+          "timestamp": 253402300800000,
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e06",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "epoch máximo + fracción → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e07",
+        "_source": {
+          "timestamp": 253402300799999.5,
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e07",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "ISO sin segundos → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e08",
+        "_source": {
+          "timestamp": "2026-10-25T10:15Z",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e08",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "offset solo con horas → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e09",
+        "_source": {
+          "timestamp": "2026-10-25T10:15:00+05",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e09",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "t minúscula → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e10",
+        "_source": {
+          "timestamp": "2026-10-25t10:15:00Z",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e10",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "z minúscula → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e11",
+        "_source": {
+          "timestamp": "2026-10-25T10:15:00z",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e11",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "espacio antes de la zona → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e12",
+        "_source": {
+          "timestamp": "2026-10-25T10:15:00 Z",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e12",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "separador espacio con Z",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e13",
+        "_source": {
+          "timestamp": "2026-10-25 23:30:00Z"
+        }
+      },
+      "expected": {
+        "externalId": "e13",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-25",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "separador espacio con ±hh:mm",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e14",
+        "_source": {
+          "timestamp": "2026-10-25 23:30:00-05:00"
+        }
+      },
+      "expected": {
+        "externalId": "e14",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-26",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "separador espacio con ±hhmm → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e15",
+        "_source": {
+          "timestamp": "2026-10-25 23:30:00+0500",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e15",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "separador T con ±hhmm",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e16",
+        "_source": {
+          "timestamp": "2026-10-25T00:30:00+0930"
+        }
+      },
+      "expected": {
+        "externalId": "e16",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-24",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "hora de un dígito",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e17",
+        "_source": {
+          "timestamp": "2026-10-25T5:04:05Z"
+        }
+      },
+      "expected": {
+        "externalId": "e17",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-25",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "fracción con coma y offset negativo",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e18",
+        "_source": {
+          "timestamp": "2026-10-25T23:59:59,999-01:00"
+        }
+      },
+      "expected": {
+        "externalId": "e18",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-26",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "offset +24:00",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e19",
+        "_source": {
+          "timestamp": "2026-10-26T01:00:00+24:00"
+        }
+      },
+      "expected": {
+        "externalId": "e19",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-25",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "offset +25:00 → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e20",
+        "_source": {
+          "timestamp": "2026-10-26T01:00:00+25:00",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e20",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "sin zona = UTC",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e21",
+        "_source": {
+          "timestamp": "2026-10-25T23:59:59.999999"
+        }
+      },
+      "expected": {
+        "externalId": "e21",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-25",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "fecha inexistente → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e22",
+        "_source": {
+          "timestamp": "2026-02-29",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e22",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "año 0001",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e23",
+        "_source": {
+          "timestamp": "0001-01-01"
+        }
+      },
+      "expected": {
+        "externalId": "e23",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "0001-01-01",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "ISO con espacios alrededor",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e24",
+        "_source": {
+          "timestamp": "  2026-10-25T10:15:00Z  "
+        }
+      },
+      "expected": {
+        "externalId": "e24",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-25",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "hora 24 → usa write_time",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e25",
+        "_source": {
+          "timestamp": "2026-10-25T24:00:00Z",
+          "write_time": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e25",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "writeTime": 1793196390000
+        }
+      }
+    },
+    {
+      "name": "_id con espacios se conserva tal cual",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": " z ",
+        "_source": {
+          "timestamp": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": " z ",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "_id solo espacios se conserva tal cual",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "  ",
+        "_source": {
+          "timestamp": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "  ",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "_index vacío se omite de rawData",
+      "hit": {
+        "_index": "",
+        "_id": "e28",
+        "_source": {
+          "timestamp": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e28",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "_index ausente se omite de rawData",
+      "hit": {
+        "_id": "e29",
+        "_source": {
+          "timestamp": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e29",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "_index con espacios se conserva tal cual",
+      "hit": {
+        "_index": " idx ",
+        "_id": "e30",
+        "_source": {
+          "timestamp": 1793196390000
+        }
+      },
+      "expected": {
+        "externalId": "e30",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": " idx ",
+          "source": "stellar_cyber"
+        }
+      }
+    },
+    {
+      "name": "sin fecha válida → null",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e31",
+        "_source": {
+          "timestamp": "2026-10-25T10:15Z",
+          "alert_time": -5,
+          "write_time": "ayer"
+        }
+      },
+      "expected": null
+    },
+    {
+      "name": "sin _source → null",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "e32"
+      },
+      "expected": null
+    }
+  ]
+}

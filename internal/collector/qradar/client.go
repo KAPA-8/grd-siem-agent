@@ -2,7 +2,6 @@ package qradar
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,11 +11,14 @@ import (
 	"time"
 
 	"github.com/rs/zerolog/log"
+
+	"github.com/grd-platform/grd-siem-agent/internal/siemhttp"
 )
 
 const (
 	defaultPageSize = 50
 	httpTimeout     = 30 * time.Second
+	maxErrorBody    = 4 << 10
 )
 
 // Client is the HTTP client for the QRadar REST API.
@@ -31,13 +33,13 @@ type Client struct {
 // apiVersion should be a QRadar API version (e.g., "19.0", "20.0", "26.0").
 // If empty, defaults to "19.0" (compatible with QRadar 7.5.0 UP3+).
 func NewClient(baseURL, apiKey string, validateSSL bool, apiVersion string) *Client {
-	transport := &http.Transport{}
-	if !validateSSL {
-		transport.TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec // User explicitly disabled SSL validation
-		}
-	}
+	// Without a CA file the builder cannot fail.
+	httpClient, _ := siemhttp.NewClient(siemhttp.Options{InsecureSkipVerify: !validateSSL, Timeout: httpTimeout})
+	return newClientWithHTTP(baseURL, apiKey, apiVersion, httpClient)
+}
 
+// newClientWithHTTP creates a client that uses the given HTTP client.
+func newClientWithHTTP(baseURL, apiKey, apiVersion string, httpClient *http.Client) *Client {
 	if apiVersion == "" {
 		apiVersion = "19.0"
 	}
@@ -46,10 +48,7 @@ func NewClient(baseURL, apiKey string, validateSSL bool, apiVersion string) *Cli
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		apiKey:     apiKey,
 		apiVersion: apiVersion,
-		httpClient: &http.Client{
-			Timeout:   httpTimeout,
-			Transport: transport,
-		},
+		httpClient: httpClient,
 	}
 }
 
@@ -175,7 +174,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, reqBody io.
 	}
 
 	if resp.StatusCode >= 400 {
-		bodyBytes, _ := io.ReadAll(resp.Body)
+		bodyBytes, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
 		resp.Body.Close()
 		return nil, fmt.Errorf("API error %d: %s", resp.StatusCode, string(bodyBytes))
 	}
