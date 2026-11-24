@@ -1,11 +1,12 @@
 # GRD SIEM Agent
 
-On-premises agent that collects security alerts from your SIEM (IBM QRadar, Stellar Cyber Open XDR) and sends them to the [GRD Cyber Risk](https://grd.com) platform for centralized risk management.
+On-premises agent that collects security alerts from your SIEM (IBM QRadar, Stellar Cyber Open XDR, FortiSIEM) and sends them to the [GRD Cyber Risk](https://grd.com) platform for centralized risk management.
 
 ## Features
 
 - **QRadar integration** - Collects offenses via REST API with MITRE ATT&CK mapping
 - **Stellar Cyber integration** - Collects alerts or cases from Stellar Cyber SaaS or on-prem, with native MITRE ATT&CK data ([details](#stellar-cyber-open-xdr))
+- **FortiSIEM integration** - Collects incidents from an on-prem Supervisor or FortiSIEM Cloud, with their status and false-positive resolution ([details](#fortisiem))
 - **No duplicates, no gaps** - Each alert carries its SIEM ID (the platform deduplicates on it), and the checkpoint only advances once the platform imported every alert
 - **Offline resilience** - SQLite buffer stores undelivered alerts locally until the platform accepts them
 - **Proxy and private CAs** - Honours `HTTPS_PROXY`/`NO_PROXY`; trusts an extra CA bundle (`ca_cert_file`)
@@ -108,7 +109,7 @@ Invoke-WebRequest -Uri "https://github.com/KAPA-8/grd-siem-agent/releases/latest
 # 2. Download install script
 Invoke-WebRequest -Uri "https://raw.githubusercontent.com/KAPA-8/grd-siem-agent/main/scripts/install.ps1" -OutFile "install.ps1"
 
-# 3. Run as Administrator (add -SiemType stellar_cyber for a Stellar Cyber template)
+# 3. Run as Administrator (add -SiemType stellar_cyber or -SiemType fortisiem for that SIEM's template)
 .\install.ps1 -BinaryPath .\grd-siem-agent.exe
 ```
 
@@ -181,8 +182,8 @@ A `403` during startup with `data_source: alerts` means the key cannot read the 
 
 What is collected:
 
-- **Alerts mode** queries alerts by ingestion time (`write_time`) since the last checkpoint, up to 2 minutes before now so late writes are not missed, sorted oldest first. Alerts marked **Ignored** (false positives) are skipped.
-- **Cases mode** reads the cases modified since the last checkpoint, one query per status (**New, In Progress, Escalated, Resolved**; **Cancelled** is skipped), then each case's alerts. An alert in several cases is sent once, with the first case's ID and name.
+- **Alerts mode** queries alerts by ingestion time (`write_time`) since the last checkpoint, up to 2 minutes before now so late writes are not missed, sorted oldest first. Alerts marked **Ignored** (false positives) are sent with that status: the platform stores them out of the FAIR frequency, never inserts a new one, and an alert marked Ignored later leaves the frequency.
+- **Cases mode** reads the cases modified since the last checkpoint, one query per status (**New, In Progress, Escalated, Resolved**; **Cancelled** is skipped), then each case's alerts. An alert in several cases is sent once, with the first case's ID and name, and with the case's status as its source status (an Ignored alert is marked as such).
 - `sync.filters.min_severity` filters on the Stellar Cyber score (0-100): `info` 0, `low` 20, `medium` 40, `high` 60, `critical` 80. The same bands set each alert's severity.
 - `credentials.tenant_id` limits collection to one tenant (`cust_id`), for MSSP/multi-tenant platforms.
 - Each cycle reads up to `sync.max_alerts_per_sync` alerts (at most 10000) and posts them in batches of 500. A larger backlog continues on the next cycle.
@@ -231,6 +232,133 @@ sudo systemctl edit grd-siem-agent
 sudo systemctl restart grd-siem-agent
 ```
 
+## FortiSIEM
+
+The `fortisiem` collector reads incidents from **FortiSIEM on-prem** (a Supervisor, 6.3 and later) and **FortiSIEM Cloud** through `POST /phoenix/rest/pub/incident`.
+
+### Before you start
+
+| | On-prem Supervisor | FortiSIEM Cloud |
+|---|---|---|
+| `siem.deployment` | `onprem` | `cloud` (default) |
+| `siem.api_url` | `https://<supervisor-host>` (port 443) | `https://ID-fsm.REGION.fortisoc.forticloud.com` (the URL shown in the FortiCloud portal) |
+| Authentication | `auth_mode: basic` (the only one before 7.5) | `auth_mode: oauth` (client credentials) or `basic` |
+| TLS | Verified by default. For the Supervisor's self-signed certificate set `ca_cert_file` (preferred) or `validate_ssl: false` | Always verified; `validate_ssl` is ignored |
+| Network | Agent host → Supervisor, HTTPS 443/TCP | Agent host → FortiSIEM Cloud, HTTPS 443/TCP (usually through the proxy) |
+
+In both cases the agent also needs outbound HTTPS to the GRD platform (`platform.url`). Private IP addresses are fine for `api_url`. A pasted `/phoenix/...` suffix or trailing `/` is removed.
+
+### Credentials
+
+| `credentials.auth_mode` | FortiSIEM versions | Settings |
+|---|---|---|
+| `basic` (default) | Every version; **the only option on 7.4.x and earlier** | `organization`, `username`, `password` |
+| `oauth` | 7.5.0 and later, and FortiSIEM Cloud | `client_id`, `client_secret` |
+
+**Basic.** FortiSIEM expects the user with its organization prefix, `<organization>/<user>`; the agent builds it from `organization` (default `super`) and `username`:
+
+- **Enterprise** install: `organization: "super"` and the user name (sent as `super/<user>`).
+- **Service Provider**: the organization's own user (`organization: "<Org name>"`), or a `super` user plus `tenant_id: "<Org name or phCustId>"` to import only that organization.
+
+A `username` that already contains `/` (for example `super/apiuser`) is sent as-is. Use a dedicated account with read access to incidents.
+
+**Passwords with special characters** (`$ " ' : @ /`...) work as they are: only the first `:` separates the user from the password, and the agent never passes them through a shell. In `config.yaml` write the password between **single quotes** and double any `'` inside it (`password: 'it''s:$ecret'`). To keep it out of the file, set `GRD_SIEM_PASSWORD` instead (`GRD_SIEM_CREDENTIALS_PASSWORD` works too); for OAuth, `GRD_SIEM_CLIENT_SECRET`.
+
+**OAuth** (7.5+ only) exchanges `client_id`/`client_secret` for a bearer token (`POST /phoenix/rest/pub/security/oauth/token`), caches it until a minute before `expires_in` (24 hours on FortiSIEM Cloud) and refreshes it after a 401. On 7.4 or earlier there is no token endpoint: the agent says so and asks for `auth_mode: basic`.
+
+### What is collected
+
+- FortiSIEM filters the query window on **`incidentLastSeen`**, so collection follows it: each cycle asks for the incidents seen since the checkpoint minus a 10-minute overlap, sorted by `incidentLastSeen`, in pages of 500. The checkpoint keeps the highest `incidentLastSeen` delivered and the incidents delivered at that exact millisecond; the overlap already delivered is not posted again.
+- An incident that keeps receiving events comes back in every window. One **first seen before** `now - lookback_days` is sent as *status only*: the platform refreshes the status of an incident it already has and never inserts it.
+- Each incident carries its FortiSIEM status (`active`, `auto_cleared`, `manually_cleared`, `system_cleared`, plus `/true_positive`, `/false_positive` or `/in_progress` from the resolution). **False positives** are stored but left out of the FAIR frequency, and a new false positive is never inserted.
+- An analyst can resolve an incident without its `incidentLastSeen` changing, so every `sync.status_refresh_hours` (default 6, `0` disables it) the agent reads the whole lookback window again and sends every incident, which refreshes the stored statuses.
+- `credentials.security_only` (default `true`) keeps only the **Security** category. `credentials.tenant_id` keeps one organization (its name, ignoring case and spaces, or its `phCustId`). `sync.filters.min_severity` applies to the mapped severity (`eventSeverity` 10 critical, 9 high, 5-8 medium, 1-4 low, 0 info).
+- Each cycle sends up to `sync.max_alerts_per_sync` incidents (at most 10000); a larger backlog continues on the next cycle. The first cycle reads the whole lookback window: a busy FortiSIEM has around a thousand incidents a day, so the first cycles may take a few rounds.
+
+### Example (on-prem 7.4, self-signed certificate)
+
+```yaml
+siem:
+  type: "fortisiem"
+  connection_id: "uuid-from-dashboard"
+  api_url: "https://10.0.0.10"
+  deployment: "onprem"
+  credentials:
+    auth_mode: "basic"
+    organization: "super"
+    username: "grd-api"
+    password: ''              # or GRD_SIEM_PASSWORD
+    tenant_id: ""
+    security_only: true
+    validate_ssl: true
+    ca_cert_file: "/etc/grd-siem-agent/fortisiem-supervisor.pem"
+sync:
+  status_refresh_hours: 6
+```
+
+FortiSIEM Cloud:
+
+```yaml
+siem:
+  type: "fortisiem"
+  connection_id: "uuid-from-dashboard"
+  api_url: "https://ID-fsm.REGION.fortisoc.forticloud.com"
+  deployment: "cloud"
+  credentials:
+    auth_mode: "oauth"
+    client_id: "client-id"
+    client_secret: ""         # or GRD_SIEM_CLIENT_SECRET
+```
+
+To get the Supervisor certificate for `ca_cert_file` (compare its fingerprint with the one the Supervisor shows):
+
+```bash
+openssl s_client -connect 10.0.0.10:443 -showcerts </dev/null 2>/dev/null \
+  | openssl x509 -outform PEM | sudo tee /etc/grd-siem-agent/fortisiem-supervisor.pem
+openssl x509 -in /etc/grd-siem-agent/fortisiem-supervisor.pem -noout -fingerprint -sha256
+```
+
+### Installing on site
+
+Linux (systemd):
+
+```bash
+sudo ./install.sh --binary ./grd-siem-agent-linux-amd64 --siem-type fortisiem
+sudo nano /etc/grd-siem-agent/config.yaml       # api_url, deployment, organization, username, password
+# Test the SIEM side first: needs neither the agent token nor the connection ID, sends nothing to GRD
+sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent test-siem --config /etc/grd-siem-agent/config.yaml
+sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent test-siem --collect --config /etc/grd-siem-agent/config.yaml
+# Then fill agent.id, platform.agent_token and siem.connection_id from the GRD Dashboard
+sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent validate --config /etc/grd-siem-agent/config.yaml
+sudo systemctl start grd-siem-agent
+```
+
+To keep the password out of `config.yaml` with systemd, `sudo systemctl edit grd-siem-agent` and add `Environment="GRD_SIEM_PASSWORD=..."` under `[Service]` (systemd treats `%`, `\` and quotes specially there: for such passwords prefer the single-quoted value in `config.yaml`, which is readable only by root and `grd-agent`).
+
+Windows (Administrator PowerShell):
+
+```powershell
+.\install.ps1 -BinaryPath .\grd-siem-agent.exe -SiemType fortisiem
+notepad "C:\ProgramData\GRD SIEM Agent\config.yaml"
+& "C:\Program Files\GRD SIEM Agent\grd-siem-agent.exe" test-siem --config "C:\ProgramData\GRD SIEM Agent\config.yaml"
+& "C:\Program Files\GRD SIEM Agent\grd-siem-agent.exe" validate --config "C:\ProgramData\GRD SIEM Agent\config.yaml"
+Start-Service GRDSIEMAgent
+```
+
+`test-siem` authenticates and queries one incident of the last 24 hours; `--collect` also runs one collection over the lookback window and prints how many incidents it would send (`--output file.json` writes them for inspection). No checkpoint is saved.
+
+### Troubleshooting FortiSIEM
+
+| Message | Cause | Solution |
+|---|---|---|
+| `HTTP 401: FortiSIEM rechazó el usuario o la contraseña...` | Wrong password, or the user without its organization prefix | Enterprise: `organization: "super"`. Service Provider: the organization of the user (or `super` + `tenant_id`). Check `username` and the password quoting |
+| `esta versión de FortiSIEM no tiene tokens OAuth (requiere 7.5+)` | `auth_mode: oauth` on 7.4.x or earlier | Use `auth_mode: basic` with `organization`, `username` and `password` |
+| `falló la verificación del certificado TLS ... huella SHA-256 ...` | Self-signed Supervisor certificate | Compare the fingerprint with the Supervisor's certificate, then set `ca_cert_file` (or `validate_ssl: false`) |
+| `HTTP 403` on `/phoenix/rest/pub/incident` | The user cannot read incidents through the API | Give the user a role with access to Incidents |
+| `HTTP 404` on `/phoenix/rest/pub/incident`, or `la respuesta no es JSON` | `api_url` is not the Supervisor (or a proxy answers) | Use `https://<supervisor>` without `/phoenix` |
+| `max_alerts_per_sync reached` | Backlog larger than one cycle | Nothing to do (it continues next cycle), or raise `sync.max_alerts_per_sync` |
+| Few or no incidents, or windows that look wrong | The agent host clock is off | Sync the clock (NTP): the windows are computed from the agent's clock |
+
 ## Configuration Reference
 
 | Section | Key | Default | Description |
@@ -239,21 +367,27 @@ sudo systemctl restart grd-siem-agent
 | `agent.hostname` | | auto-detected | Override hostname |
 | `platform.url` | | **required** | GRD platform URL |
 | `platform.agent_token` | | **required** | Token from GRD Dashboard registration |
-| `siem.type` | | **required** | SIEM type: `qradar`, `stellar_cyber` |
+| `siem.type` | | **required** | SIEM type: `qradar`, `stellar_cyber`, `fortisiem` |
 | `siem.connection_id` | | **required** | Connection UUID from platform dashboard |
 | `siem.api_url` | | **required** | SIEM console/API URL |
-| `siem.deployment` | | `"saas"` | Stellar Cyber: `saas` or `onprem` |
+| `siem.deployment` | | `"saas"` / `"cloud"` | Stellar Cyber: `saas` or `onprem`; FortiSIEM: `cloud` or `onprem` |
 | `siem.data_source` | | `"alerts"` | Stellar Cyber: `alerts` or `cases` |
-| `siem.credentials.api_key` | | **required** | QRadar SEC token, Stellar Cyber API token or scoped key |
-| `siem.credentials.auth_mode` | | `"api_token"` | Stellar Cyber: `api_token` or `scoped_key` |
-| `siem.credentials.username` | | | Stellar Cyber `api_token` mode: the API account email (case-sensitive) |
-| `siem.credentials.tenant_id` | | | Stellar Cyber: only collect this tenant |
-| `siem.credentials.validate_ssl` | | `true` | Validate the SIEM certificate (always on for Stellar Cyber SaaS) |
+| `siem.credentials.api_key` | | **required** (not FortiSIEM) | QRadar SEC token, Stellar Cyber API token or scoped key |
+| `siem.credentials.auth_mode` | | `"api_token"` / `"basic"` | Stellar Cyber: `api_token` or `scoped_key`; FortiSIEM: `basic` or `oauth` (7.5+) |
+| `siem.credentials.username` | | | Stellar Cyber `api_token` mode: the API account email (case-sensitive); FortiSIEM `basic`: the user, without the organization prefix |
+| `siem.credentials.organization` | | `"super"` | FortiSIEM `basic`: organization prefix of the user |
+| `siem.credentials.password` | | | FortiSIEM `basic` (or `GRD_SIEM_PASSWORD`) |
+| `siem.credentials.client_id` | | | FortiSIEM `oauth` |
+| `siem.credentials.client_secret` | | | FortiSIEM `oauth` (or `GRD_SIEM_CLIENT_SECRET`) |
+| `siem.credentials.tenant_id` | | | Stellar Cyber: only collect this tenant; FortiSIEM: only this organization (name or `phCustId`) |
+| `siem.credentials.security_only` | | `true` | FortiSIEM: only incidents of the Security category |
+| `siem.credentials.validate_ssl` | | `true` | Validate the SIEM certificate (always on for Stellar Cyber SaaS and FortiSIEM Cloud) |
 | `siem.credentials.ca_cert_file` | | | PEM bundle trusted in addition to the system CAs |
 | `siem.credentials.api_version` | | `"19.0"` | QRadar API version |
 | `sync.interval_minutes` | | `15` | Polling interval |
 | `sync.lookback_days` | | `7` | First-run lookback window |
 | `sync.max_alerts_per_sync` | | `1000` | Max alerts per cycle (1-10000; posted in batches of 500) |
+| `sync.status_refresh_hours` | | `6` | FortiSIEM: re-read the lookback window every N hours to refresh statuses (`0` = off) |
 | `sync.filters.min_severity` | | `"low"` | Minimum severity: `info`, `low`, `medium`, `high`, `critical` |
 | `buffer.enabled` | | `true` | Enable offline SQLite buffer |
 | `buffer.path` | | `"./buffer.db"` | Buffer file path (the installers set `/var/lib/grd-siem-agent/buffer.db`). The checkpoint is stored in the same directory |
@@ -278,15 +412,19 @@ export GRD_SIEM_CREDENTIALS_API_KEY="your-siem-key"
 export GRD_SYNC_INTERVAL_MINUTES=30
 ```
 
+The FortiSIEM secrets also accept the shorter `GRD_SIEM_PASSWORD` and `GRD_SIEM_CLIENT_SECRET` (`GRD_SIEM_CREDENTIALS_PASSWORD` / `GRD_SIEM_CREDENTIALS_CLIENT_SECRET` win when both are set).
+
 ### Validation
 
-`grd-siem-agent validate` (and every start) checks the whole configuration and reports every problem at once: the platform URL must use `https` (plain `http` is only accepted for `localhost`), `agent_token`, `connection_id` (a UUID), `api_url` and `api_key` are required, intervals must be greater than 0, and `max_alerts_per_sync` must be between 1 and 10000. Stellar Cyber settings are checked too (deployment, data source, auth mode, username, `https` for SaaS, a readable `ca_cert_file`).
+`grd-siem-agent validate` (and every start) checks the whole configuration and reports every problem at once: the platform URL must use `https` (plain `http` is only accepted for `localhost`), `agent_token`, `connection_id` (a UUID), `api_url` and `api_key` (except for FortiSIEM) are required, intervals must be greater than 0, and `max_alerts_per_sync` must be between 1 and 10000. Stellar Cyber settings are checked too (deployment, data source, auth mode, username, `https` for SaaS, a readable `ca_cert_file`), and so are FortiSIEM's (deployment, auth mode, the credentials it needs, `https` for Cloud).
 
 ## CLI Commands
 
 ```bash
 grd-siem-agent run       # Start the agent (foreground or service mode)
 grd-siem-agent validate  # Validate configuration file
+grd-siem-agent test-siem # Test the SIEM connection only (no agent token needed; nothing is sent to GRD)
+                         #   --collect: also run one collection and print a summary; --output FILE: write it as JSON
 grd-siem-agent update    # Check for and stage updates
 grd-siem-agent version   # Print version information
 ```
@@ -554,6 +692,7 @@ make checksums
 |------|--------|-------------|
 | IBM QRadar | Available | 19.0 - 26.0 |
 | Stellar Cyber Open XDR | Available | SaaS and on-prem 5.x - 7.x |
+| FortiSIEM | Available | On-prem 6.3+ (Basic), 7.5+ and FortiSIEM Cloud (Basic or OAuth) |
 | Splunk Enterprise | Planned | - |
 | Microsoft Sentinel | Planned | - |
 

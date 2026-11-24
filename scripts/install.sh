@@ -8,11 +8,12 @@ set -euo pipefail
 #   sudo ./install.sh
 #   sudo ./install.sh --binary /path/to/grd-siem-agent
 #   sudo ./install.sh --siem-type stellar_cyber
-#   ./install.sh --siem-type stellar_cyber --print-config   # print the config template only
+#   sudo ./install.sh --siem-type fortisiem
+#   ./install.sh --siem-type fortisiem --print-config   # print the config template only
 #
 # --siem-type selects the config template written to
-# /etc/grd-siem-agent/config.yaml on a first install: qradar (default)
-# or stellar_cyber. An existing config is never overwritten.
+# /etc/grd-siem-agent/config.yaml on a first install: qradar (default),
+# stellar_cyber or fortisiem. An existing config is never overwritten.
 # ============================================================
 
 AGENT_USER="grd-agent"
@@ -28,7 +29,7 @@ SIEM_TYPE="qradar"
 PRINT_CONFIG=false
 
 usage() {
-    echo "Usage: $0 [--binary PATH] [--siem-type qradar|stellar_cyber] [--print-config]"
+    echo "Usage: $0 [--binary PATH] [--siem-type qradar|stellar_cyber|fortisiem] [--print-config]"
 }
 
 # Parse arguments
@@ -61,9 +62,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$SIEM_TYPE" in
-    qradar|stellar_cyber) ;;
+    qradar|stellar_cyber|fortisiem) ;;
     *)
-        echo "Error: --siem-type must be qradar or stellar_cyber (got: $SIEM_TYPE)"
+        echo "Error: --siem-type must be qradar, stellar_cyber or fortisiem (got: $SIEM_TYPE)"
         exit 1
         ;;
 esac
@@ -101,6 +102,26 @@ siem:
     ca_cert_file: ""        # on-prem: PEM bundle of the Data Processor's CA
 YAML
             ;;
+        fortisiem)
+            cat << 'YAML'
+siem:
+  type: "fortisiem"
+  connection_id: ""         # Connection UUID from the GRD Dashboard
+  api_url: ""               # on-prem: https://<supervisor> / Cloud: https://ID-fsm.REGION.fortisoc.forticloud.com
+  deployment: "onprem"      # onprem (Supervisor) | cloud (FortiSIEM Cloud)
+  credentials:
+    auth_mode: "basic"      # basic: organization/user + password (every version) | oauth: FortiSIEM 7.5+ only
+    organization: "super"   # basic: Enterprise -> super; Service Provider -> the organization name (or super + tenant_id)
+    username: ""            # basic: FortiSIEM user, without the organization prefix
+    password: ''            # basic: keep the 'single quotes' (double any ' inside), or GRD_SIEM_PASSWORD
+    client_id: ""           # oauth only
+    client_secret: ""       # oauth only (or GRD_SIEM_CLIENT_SECRET)
+    tenant_id: ""           # optional: only this organization (name or phCustId)
+    security_only: true     # only incidents of the Security category
+    validate_ssl: true      # on-prem: false only for a self-signed certificate without ca_cert_file
+    ca_cert_file: ""        # on-prem: PEM certificate of the Supervisor (self-signed)
+YAML
+            ;;
     esac
 }
 
@@ -132,6 +153,7 @@ sync:
   interval_minutes: 15
   lookback_days: 7
   max_alerts_per_sync: 1000
+  status_refresh_hours: 6   # FortiSIEM: re-read the lookback window every N hours for status changes (0 = off)
   filters:
     min_severity: "medium"
 
@@ -338,6 +360,13 @@ if [[ "$SIEM_TYPE" == "stellar_cyber" ]]; then
     echo "     data_source, auth_mode, username (api_token mode) and api_key"
     echo "     (or GRD_SIEM_CREDENTIALS_API_KEY). For a self-signed on-prem"
     echo "     Data Processor, set ca_cert_file (or validate_ssl: false)."
+elif [[ "$SIEM_TYPE" == "fortisiem" ]]; then
+    echo "  3. Set the FortiSIEM connection: connection_id, api_url (the Supervisor),"
+    echo "     deployment, organization, username and password (or GRD_SIEM_PASSWORD)."
+    echo "     For a self-signed Supervisor, set ca_cert_file (or validate_ssl: false)."
+    echo "     Test the SIEM side without contacting GRD:"
+    echo "       sudo -u $AGENT_USER $INSTALL_DIR/grd-siem-agent test-siem \\"
+    echo "         --config $CONFIG_DIR/config.yaml"
 else
     echo "  3. Set the SIEM connection details (api_url, api_key, connection_id)"
 fi

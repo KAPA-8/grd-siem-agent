@@ -22,6 +22,7 @@ var placeholderValues = []struct {
 	{regexp.MustCompile(`(?m)^(\s*)api_url: ""`), `${1}api_url: "https://siem.example.com"`},
 	{regexp.MustCompile(`(?m)^(\s*)api_key: ""`), `${1}api_key: "secret"`},
 	{regexp.MustCompile(`(?m)^(\s*)username: ""`), `${1}username: "api@acme.com"`},
+	{regexp.MustCompile(`(?m)^(\s*)password: ''`), `${1}password: 'p:a$s"w''o@r/d'`},
 }
 
 func fillPlaceholders(yaml string) string {
@@ -59,7 +60,7 @@ func TestTemplates_InstallSh(t *testing.T) {
 	if err != nil {
 		t.Skip("bash not available")
 	}
-	for _, siemType := range []string{"qradar", "stellar_cyber"} {
+	for _, siemType := range []string{"qradar", "stellar_cyber", "fortisiem"} {
 		out, err := exec.Command(bash, "../../scripts/install.sh", "--siem-type", siemType, "--print-config").Output()
 		if err != nil {
 			t.Fatalf("install.sh --print-config %s: %v", siemType, err)
@@ -76,18 +77,21 @@ func TestTemplates_InstallSh(t *testing.T) {
 func TestTemplates_InstallPs1(t *testing.T) {
 	script := readRepoFile(t, "../../scripts/install.ps1")
 	hereStrings := regexp.MustCompile(`(?s)@"\n(.*?)\n"@`).FindAllStringSubmatch(script, -1)
-	if len(hereStrings) != 3 {
-		t.Fatalf("found %d here-strings in install.ps1, want 3 (stellar_cyber, qradar, config)", len(hereStrings))
+	if len(hereStrings) != 4 {
+		t.Fatalf("found %d here-strings in install.ps1, want 4 (stellar_cyber, fortisiem, qradar, config)", len(hereStrings))
 	}
-	stellar, qradar, config := hereStrings[0][1], hereStrings[1][1], hereStrings[2][1]
-	if !strings.Contains(stellar, `type: "stellar_cyber"`) || !strings.Contains(qradar, `type: "qradar"`) {
+	stellar, fortisiem, qradar, config := hereStrings[0][1], hereStrings[1][1], hereStrings[2][1], hereStrings[3][1]
+	if !strings.Contains(stellar, `type: "stellar_cyber"`) || !strings.Contains(fortisiem, `type: "fortisiem"`) || !strings.Contains(qradar, `type: "qradar"`) {
 		t.Fatal("unexpected here-string order in install.ps1")
+	}
+	if !strings.Contains(script, `[ValidateSet("qradar", "stellar_cyber", "fortisiem")]`) {
+		t.Error("install.ps1 -SiemType does not accept fortisiem")
 	}
 	expand := strings.NewReplacer(
 		`$($DataDir -replace '\\', '/')`, "C:/ProgramData/GRD SIEM Agent/data",
 		`$($LogDir -replace '\\', '/')`, "C:/ProgramData/GRD SIEM Agent/logs",
 	)
-	for siemType, siem := range map[string]string{"qradar": qradar, "stellar_cyber": stellar} {
+	for siemType, siem := range map[string]string{"qradar": qradar, "stellar_cyber": stellar, "fortisiem": fortisiem} {
 		yaml := expand.Replace(strings.Replace(config, "$siem", siem, 1))
 		if strings.Contains(yaml, "$") {
 			t.Fatalf("unexpanded PowerShell expression in the %s template:\n%s", siemType, yaml)
@@ -100,28 +104,29 @@ func TestTemplates_ConfigExample(t *testing.T) {
 	example := readRepoFile(t, "../../configs/config.example.yaml")
 	validateTemplate(t, "config.example.yaml (qradar)", example, "qradar")
 
-	// The Stellar Cyber block is commented out; swap it in for the QRadar one.
+	// The Stellar Cyber and FortiSIEM blocks are commented out; swap each in
+	// for the QRadar one.
 	lines := strings.Split(example, "\n")
-	var stellar []string
-	start := -1
-	for i, line := range lines {
-		if line == "# siem:" {
-			start = i
+	var blocks [][]string
+	for i := 0; i < len(lines); i++ {
+		if lines[i] != "# siem:" {
+			continue
 		}
-		if start >= 0 {
-			if !strings.HasPrefix(line, "#") {
-				break
-			}
-			stellar = append(stellar, strings.TrimPrefix(strings.TrimPrefix(line, "#"), " "))
+		var block []string
+		for ; i < len(lines) && strings.HasPrefix(lines[i], "#"); i++ {
+			block = append(block, strings.TrimPrefix(strings.TrimPrefix(lines[i], "#"), " "))
 		}
+		blocks = append(blocks, block)
 	}
-	if start < 0 || len(stellar) < 10 {
-		t.Fatal("Stellar Cyber example block not found in config.example.yaml")
+	if len(blocks) != 2 || len(blocks[0]) < 10 || len(blocks[1]) < 10 {
+		t.Fatalf("found %d commented siem blocks in config.example.yaml, want 2 (stellar_cyber, fortisiem)", len(blocks))
 	}
 	qradar := regexp.MustCompile(`(?s)\nsiem:\n  type: "qradar".*?\n\n`)
 	if !qradar.MatchString(example) {
 		t.Fatal("QRadar siem block not found in config.example.yaml")
 	}
-	swapped := qradar.ReplaceAllLiteralString(example, "\n"+strings.Join(stellar, "\n")+"\n\n")
-	validateTemplate(t, "config.example.yaml (stellar_cyber)", swapped, "stellar_cyber")
+	for i, siemType := range []string{"stellar_cyber", "fortisiem"} {
+		swapped := qradar.ReplaceAllLiteralString(example, "\n"+strings.Join(blocks[i], "\n")+"\n\n")
+		validateTemplate(t, "config.example.yaml ("+siemType+")", swapped, siemType)
+	}
 }

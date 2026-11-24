@@ -8,7 +8,7 @@
 .PARAMETER BinaryPath
     Path to the grd-siem-agent.exe binary
 .PARAMETER SiemType
-    Config template written on a first install: qradar (default) or stellar_cyber.
+    Config template written on a first install: qradar (default), stellar_cyber or fortisiem.
     An existing config.yaml is never overwritten.
 .PARAMETER PrintConfig
     Print the config template for -SiemType and exit without installing.
@@ -16,11 +16,12 @@
     .\install.ps1
     .\install.ps1 -BinaryPath .\grd-siem-agent.exe
     .\install.ps1 -BinaryPath .\grd-siem-agent.exe -SiemType stellar_cyber
+    .\install.ps1 -BinaryPath .\grd-siem-agent.exe -SiemType fortisiem
 #>
 
 param(
     [string]$BinaryPath = "",
-    [ValidateSet("qradar", "stellar_cyber")]
+    [ValidateSet("qradar", "stellar_cyber", "fortisiem")]
     [string]$SiemType = "qradar",
     [switch]$PrintConfig
 )
@@ -53,6 +54,26 @@ siem:
     tenant_id: ""           # optional: limit to one tenant (cust_id)
     validate_ssl: true      # on-prem only; SaaS certificates are always verified
     ca_cert_file: ""        # on-prem: PEM bundle of the Data Processor's CA
+"@
+    }
+    if ($Type -eq "fortisiem") {
+        return @"
+siem:
+  type: "fortisiem"
+  connection_id: ""         # Connection UUID from the GRD Dashboard
+  api_url: ""               # on-prem: https://<supervisor> / Cloud: https://ID-fsm.REGION.fortisoc.forticloud.com
+  deployment: "onprem"      # onprem (Supervisor) | cloud (FortiSIEM Cloud)
+  credentials:
+    auth_mode: "basic"      # basic: organization/user + password (every version) | oauth: FortiSIEM 7.5+ only
+    organization: "super"   # basic: Enterprise -> super; Service Provider -> the organization name (or super + tenant_id)
+    username: ""            # basic: FortiSIEM user, without the organization prefix
+    password: ''            # basic: keep the 'single quotes' (double any ' inside), or GRD_SIEM_PASSWORD
+    client_id: ""           # oauth only
+    client_secret: ""       # oauth only (or GRD_SIEM_CLIENT_SECRET)
+    tenant_id: ""           # optional: only this organization (name or phCustId)
+    security_only: true     # only incidents of the Security category
+    validate_ssl: true      # on-prem: false only for a self-signed certificate without ca_cert_file
+    ca_cert_file: ""        # on-prem: PEM certificate of the Supervisor (self-signed)
 "@
     }
     return @"
@@ -93,6 +114,7 @@ sync:
   interval_minutes: 15
   lookback_days: 7
   max_alerts_per_sync: 1000
+  status_refresh_hours: 6   # FortiSIEM: re-read the lookback window every N hours for status changes (0 = off)
   filters:
     min_severity: "medium"
 
@@ -245,6 +267,12 @@ if ($SiemType -eq "stellar_cyber") {
     Write-Host "  3. Set the Stellar Cyber connection: connection_id, api_url, deployment,"
     Write-Host "     data_source, auth_mode, username (api_token mode) and api_key."
     Write-Host "     For a self-signed on-prem Data Processor, set ca_cert_file."
+} elseif ($SiemType -eq "fortisiem") {
+    Write-Host "  3. Set the FortiSIEM connection: connection_id, api_url (the Supervisor),"
+    Write-Host "     deployment, organization, username and password (or GRD_SIEM_PASSWORD)."
+    Write-Host "     For a self-signed Supervisor, set ca_cert_file (or validate_ssl: false)."
+    Write-Host "     Test the SIEM side without contacting GRD:"
+    Write-Host "     & `"$InstallDir\grd-siem-agent.exe`" test-siem --config `"$ConfigDir\config.yaml`"" -ForegroundColor White
 } else {
     Write-Host "  3. Set SIEM connection details (api_url, api_key, connection_id)"
 }
