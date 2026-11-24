@@ -38,29 +38,39 @@ type PlatformConfig struct {
 }
 
 type SIEMConfig struct {
-	Type         string           `mapstructure:"type"`          // registered collector: qradar | stellar_cyber
+	Type         string           `mapstructure:"type"`          // registered collector: qradar | stellar_cyber | fortisiem
 	APIURL       string           `mapstructure:"api_url"`       // SIEM API base URL
 	ConnectionID string           `mapstructure:"connection_id"` // Platform connection UUID
-	Deployment   string           `mapstructure:"deployment"`    // stellar_cyber: saas (default) | onprem
+	Deployment   string           `mapstructure:"deployment"`    // stellar_cyber: saas (default) | onprem; fortisiem: cloud (default) | onprem
 	DataSource   string           `mapstructure:"data_source"`   // stellar_cyber: alerts (default) | cases
 	Credentials  CredentialConfig `mapstructure:"credentials"`
 }
 
 type CredentialConfig struct {
-	Username    string `mapstructure:"username"`     // stellar_cyber api_token mode: account email (case-sensitive)
-	APIKey      string `mapstructure:"api_key"`      // QRadar SEC token / Stellar Cyber API token or scoped key
-	AuthMode    string `mapstructure:"auth_mode"`    // stellar_cyber: api_token (default) | scoped_key
-	TenantID    string `mapstructure:"tenant_id"`    // stellar_cyber: optional tenant (cust_id) filter
-	ValidateSSL bool   `mapstructure:"validate_ssl"` // verify the SIEM certificate (always on for Stellar Cyber SaaS)
-	CACertFile  string `mapstructure:"ca_cert_file"` // optional PEM bundle trusted in addition to the system roots
-	APIVersion  string `mapstructure:"api_version"`  // QRadar API version (default: "19.0")
+	Username     string `mapstructure:"username"`      // stellar_cyber api_token mode: account email (case-sensitive); fortisiem basic: user name
+	APIKey       string `mapstructure:"api_key"`       // QRadar SEC token / Stellar Cyber API token or scoped key
+	AuthMode     string `mapstructure:"auth_mode"`     // stellar_cyber: api_token (default) | scoped_key; fortisiem: basic (default) | oauth
+	TenantID     string `mapstructure:"tenant_id"`     // stellar_cyber: optional tenant (cust_id) filter; fortisiem: organization name or phCustId to import
+	ValidateSSL  bool   `mapstructure:"validate_ssl"`  // verify the SIEM certificate (always on for Stellar Cyber SaaS and FortiSIEM Cloud)
+	CACertFile   string `mapstructure:"ca_cert_file"`  // optional PEM bundle trusted in addition to the system roots
+	APIVersion   string `mapstructure:"api_version"`   // QRadar API version (default: "19.0")
+	Organization string `mapstructure:"organization"`  // fortisiem basic: organization prefix of the user (default "super")
+	Password     string `mapstructure:"password"`      // fortisiem basic (or GRD_SIEM_PASSWORD)
+	ClientID     string `mapstructure:"client_id"`     // fortisiem oauth (7.5+)
+	ClientSecret string `mapstructure:"client_secret"` // fortisiem oauth (or GRD_SIEM_CLIENT_SECRET)
+	SecurityOnly bool   `mapstructure:"security_only"` // fortisiem: only incidents of the Security category (default true)
 }
 
 type SyncConfig struct {
-	IntervalMinutes  int     `mapstructure:"interval_minutes"`
-	LookbackDays     int     `mapstructure:"lookback_days"`
-	MaxAlertsPerSync int     `mapstructure:"max_alerts_per_sync"`
-	Filters          Filters `mapstructure:"filters"`
+	IntervalMinutes  int `mapstructure:"interval_minutes"`
+	LookbackDays     int `mapstructure:"lookback_days"`
+	MaxAlertsPerSync int `mapstructure:"max_alerts_per_sync"`
+	// StatusRefreshHours spaces out the status sweeps of collectors whose
+	// source changes an alert's status without reporting it as new
+	// (fortisiem): every N hours the whole lookback window is read again and
+	// sent as status-only. 0 disables it. Default 6.
+	StatusRefreshHours int     `mapstructure:"status_refresh_hours"`
+	Filters            Filters `mapstructure:"filters"`
 }
 
 type Filters struct {
@@ -111,6 +121,24 @@ func EnvVarName(key string) string {
 	return EnvPrefix + "_" + strings.ToUpper(strings.ReplaceAll(key, ".", "_"))
 }
 
+// envAliases are shorter environment variables accepted for some secrets, as
+// the installation guides name them. The canonical name (EnvVarName) wins
+// when both are set.
+var envAliases = map[string]string{
+	"siem.credentials.password":      "GRD_SIEM_PASSWORD",
+	"siem.credentials.client_secret": "GRD_SIEM_CLIENT_SECRET",
+}
+
+// EnvVarNames returns every environment variable that overrides a key: the
+// canonical one first, then its alias, if any.
+func EnvVarNames(key string) []string {
+	names := []string{EnvVarName(key)}
+	if alias, ok := envAliases[key]; ok {
+		names = append(names, alias)
+	}
+	return names
+}
+
 // Load reads the configuration from the given YAML file path,
 // applies defaults, binds environment variables, and validates.
 func Load(path string) (*Config, error) {
@@ -159,7 +187,7 @@ func read(path string) (*Config, error) {
 // GRD_PLATFORM_AGENT_TOKEN with no agent_token key in the YAML) was ignored.
 func bindEnv(v *viper.Viper) error {
 	for _, key := range Keys() {
-		if err := v.BindEnv(key, EnvVarName(key)); err != nil {
+		if err := v.BindEnv(append([]string{key}, EnvVarNames(key)...)...); err != nil {
 			return fmt.Errorf("binding %s: %w", EnvVarName(key), err)
 		}
 	}
@@ -209,10 +237,16 @@ func normalize(cfg *Config) {
 		&cfg.SIEM.Credentials.AuthMode,
 		&cfg.SIEM.Credentials.TenantID,
 		&cfg.SIEM.Credentials.CACertFile,
+		&cfg.SIEM.Credentials.Organization,
+		&cfg.SIEM.Credentials.ClientID,
+		&cfg.SIEM.Credentials.ClientSecret,
 		&cfg.Sync.Filters.MinSeverity,
 	} {
 		*s = strings.TrimSpace(*s)
 	}
+	// A password may begin or end with spaces: only the line break an
+	// environment variable or a pasted value tends to carry is dropped.
+	cfg.SIEM.Credentials.Password = strings.Trim(cfg.SIEM.Credentials.Password, "\r\n")
 	cfg.SIEM.Type = strings.ToLower(cfg.SIEM.Type)
 	cfg.Sync.Filters.MinSeverity = strings.ToLower(cfg.Sync.Filters.MinSeverity)
 }
@@ -264,6 +298,10 @@ func safeFileName(s string) string {
 // Stellar Cyber search window; the agent posts them in chunks of 500).
 const MaxAlertsPerSyncLimit = 10000
 
+// siemTypesWithoutAPIKey authenticate with other credentials, which their
+// collector validates (fortisiem: password or client_secret).
+var siemTypesWithoutAPIKey = map[string]bool{"fortisiem": true}
+
 var (
 	uuidPattern     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	validSeverities = map[string]bool{"": true, "info": true, "low": true, "medium": true, "high": true, "critical": true}
@@ -296,7 +334,7 @@ func validate(cfg *Config) error {
 	if cfg.SIEM.APIURL == "" {
 		add("siem.api_url is required")
 	}
-	if cfg.SIEM.Credentials.APIKey == "" {
+	if cfg.SIEM.Credentials.APIKey == "" && !siemTypesWithoutAPIKey[cfg.SIEM.Type] {
 		add("siem.credentials.api_key is required (or set %s)", EnvVarName("siem.credentials.api_key"))
 	}
 	// Type-specific checks (and the registry lookup) once the basics are set.
@@ -311,6 +349,9 @@ func validate(cfg *Config) error {
 	}
 	if cfg.Sync.LookbackDays <= 0 {
 		add("sync.lookback_days must be greater than 0")
+	}
+	if cfg.Sync.StatusRefreshHours < 0 {
+		add("sync.status_refresh_hours cannot be negative (0 disables the status sweep; got %d)", cfg.Sync.StatusRefreshHours)
 	}
 	if cfg.Sync.MaxAlertsPerSync < 1 || cfg.Sync.MaxAlertsPerSync > MaxAlertsPerSyncLimit {
 		add("sync.max_alerts_per_sync must be between 1 and %d (got %d)", MaxAlertsPerSyncLimit, cfg.Sync.MaxAlertsPerSync)

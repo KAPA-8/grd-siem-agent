@@ -5,12 +5,14 @@
 package siemhttp
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -78,4 +80,35 @@ func IsCertificateError(err error) bool {
 		errors.As(err, &unknownAuthority) ||
 		errors.As(err, &hostnameErr) ||
 		errors.As(err, &invalidErr)
+}
+
+// CertificateFingerprint returns the SHA-256 fingerprint (colon-separated
+// upper-case hex, as browsers and openssl print it) of the server certificate
+// a certificate verification error refers to, or "" when err carries none. A
+// technician compares it with the appliance's certificate before trusting it.
+func CertificateFingerprint(err error) string {
+	var cert *x509.Certificate
+	var verifyErr *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostnameErr x509.HostnameError
+	var invalidErr x509.CertificateInvalidError
+	switch {
+	case errors.As(err, &verifyErr) && len(verifyErr.UnverifiedCertificates) > 0:
+		cert = verifyErr.UnverifiedCertificates[0]
+	case errors.As(err, &unknownAuthority):
+		cert = unknownAuthority.Cert
+	case errors.As(err, &hostnameErr):
+		cert = hostnameErr.Certificate
+	case errors.As(err, &invalidErr):
+		cert = invalidErr.Cert
+	}
+	if cert == nil {
+		return ""
+	}
+	sum := sha256.Sum256(cert.Raw)
+	parts := make([]string, len(sum))
+	for i, b := range sum {
+		parts[i] = fmt.Sprintf("%02X", b)
+	}
+	return strings.Join(parts, ":")
 }

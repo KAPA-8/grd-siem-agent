@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/kardianos/service"
 	"github.com/rs/zerolog/log"
@@ -19,6 +22,7 @@ import (
 	"github.com/grd-platform/grd-siem-agent/internal/version"
 
 	// Register collectors via init()
+	_ "github.com/grd-platform/grd-siem-agent/internal/collector/fortisiem"
 	_ "github.com/grd-platform/grd-siem-agent/internal/collector/qradar"
 	_ "github.com/grd-platform/grd-siem-agent/internal/collector/stellarcyber"
 )
@@ -29,13 +33,14 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:   "grd-siem-agent",
 		Short: "GRD SIEM Agent - On-premises collector for SIEM integration",
-		Long:  "Collects alerts from SIEMs (IBM QRadar, Stellar Cyber Open XDR) and sends them to the GRD platform.",
+		Long:  "Collects alerts from SIEMs (IBM QRadar, Stellar Cyber Open XDR, FortiSIEM) and sends them to the GRD platform.",
 	}
 
 	rootCmd.PersistentFlags().StringVarP(&configPath, "config", "c", "config.yaml", "path to config file")
 
 	rootCmd.AddCommand(runCmd())
 	rootCmd.AddCommand(validateCmd())
+	rootCmd.AddCommand(testSIEMCmd())
 	rootCmd.AddCommand(versionCmd())
 	rootCmd.AddCommand(updateCmd())
 
@@ -190,6 +195,22 @@ func validateCmd() *cobra.Command {
 				fmt.Fprintf(out, "  Auth mode:     %s\n", orDefault(cfg.SIEM.Credentials.AuthMode, "api_token"))
 				fmt.Fprintf(out, "  Tenant:        %s\n", orDefault(cfg.SIEM.Credentials.TenantID, "(all)"))
 			}
+			if cfg.SIEM.Type == "fortisiem" {
+				cred := cfg.SIEM.Credentials
+				authMode := orDefault(cred.AuthMode, "basic")
+				fmt.Fprintf(out, "  Deployment:    %s\n", orDefault(cfg.SIEM.Deployment, "cloud"))
+				fmt.Fprintf(out, "  Auth mode:     %s\n", authMode)
+				if authMode == "basic" {
+					user := cred.Username
+					if !strings.Contains(user, "/") {
+						user = orDefault(cred.Organization, "super") + "/" + user
+					}
+					fmt.Fprintf(out, "  User:          %s\n", user)
+				}
+				fmt.Fprintf(out, "  Tenant:        %s\n", orDefault(cred.TenantID, "(all)"))
+				fmt.Fprintf(out, "  Security only: %v\n", cred.SecurityOnly)
+				fmt.Fprintf(out, "  Status sweep:  %s\n", statusSweep(cfg.Sync.StatusRefreshHours))
+			}
 			fmt.Fprintf(out, "  Connection ID: %s\n", cfg.SIEM.ConnectionID)
 			fmt.Fprintf(out, "  Platform:      %s\n", cfg.Platform.URL)
 			fmt.Fprintf(out, "  Interval:      %d minutes\n", cfg.Sync.IntervalMinutes)
@@ -201,6 +222,104 @@ func validateCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func statusSweep(hours int) string {
+	if hours <= 0 {
+		return "disabled"
+	}
+	return fmt.Sprintf("every %d hours", hours)
+}
+
+// testSIEMCmd checks the SIEM side of the configuration on site, before the
+// agent is registered in GRD: it needs neither platform.agent_token nor
+// siem.connection_id, and it never contacts the platform.
+func testSIEMCmd() *cobra.Command {
+	var collect bool
+	var output string
+	cmd := &cobra.Command{
+		Use:   "test-siem",
+		Short: "Test the connection to the SIEM (nothing is sent to the GRD platform)",
+		Long: `Authenticates against the SIEM and runs a minimal query, without contacting
+the GRD platform. With --collect it also runs one collection over the lookback
+window and prints a summary (no checkpoint is saved); --output writes the
+collected alerts to a JSON file for inspection.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.LoadMinimal(configPath)
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			if err := logging.Setup(cfg.Logging.Level, ""); err != nil {
+				return fmt.Errorf("setting up logging: %w", err)
+			}
+			if err := collector.ValidateConfig(cfg.SIEM); err != nil {
+				return fmt.Errorf("SIEM configuration is invalid: %w", err)
+			}
+			coll, err := collector.New(cfg.SIEM, cfg.Sync)
+			if err != nil {
+				return fmt.Errorf("SIEM configuration is invalid: %w", err)
+			}
+			defer coll.Close()
+
+			parent := cmd.Context()
+			if parent == nil {
+				parent = context.Background()
+			}
+			ctx, stop := signal.NotifyContext(parent, syscall.SIGINT, syscall.SIGTERM)
+			defer stop()
+			out := cmd.OutOrStdout()
+
+			testCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+			defer cancel()
+			if tester, ok := coll.(collector.ConnectionTester); ok {
+				msg, err := tester.TestConnection(testCtx)
+				if err != nil {
+					return fmt.Errorf("SIEM connection test failed: %w", err)
+				}
+				fmt.Fprintf(out, "SIEM connection OK: %s\n", msg)
+			} else {
+				if err := coll.Init(testCtx); err != nil {
+					return fmt.Errorf("SIEM connection test failed: %w", err)
+				}
+				fmt.Fprintf(out, "SIEM connection OK (%s).\n", cfg.SIEM.Type)
+			}
+			if !collect {
+				return nil
+			}
+
+			batch, err := coll.Collect(ctx, "")
+			if err != nil {
+				return fmt.Errorf("test collection failed: %w", err)
+			}
+			statusOnly, excluded := 0, 0
+			for _, t := range batch.Templates {
+				if t.StatusOnly {
+					statusOnly++
+				}
+				if t.FairExcluded != nil && *t.FairExcluded {
+					excluded++
+				}
+			}
+			fmt.Fprintf(out, "Test collection (nothing was sent to GRD, no checkpoint saved):\n")
+			fmt.Fprintf(out, "  Window:        %s .. %s\n", batch.WindowFrom.UTC().Format(time.RFC3339), batch.WindowTo.UTC().Format(time.RFC3339))
+			fmt.Fprintf(out, "  Read:          %d\n", batch.Fetched)
+			fmt.Fprintf(out, "  Alerts:        %d (status only: %d, discarded at the source: %d)\n", len(batch.Templates), statusOnly, excluded)
+			if output != "" {
+				data, err := json.MarshalIndent(batch.Templates, "", "  ")
+				if err != nil {
+					return err
+				}
+				if err := os.WriteFile(output, data, 0o600); err != nil {
+					return fmt.Errorf("writing %s: %w", output, err)
+				}
+				fmt.Fprintf(out, "  Written to:    %s\n", output)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&collect, "collect", false, "also run one collection over the lookback window and print a summary")
+	cmd.Flags().StringVar(&output, "output", "", "with --collect, write the collected alerts to this JSON file")
+	return cmd
 }
 
 func orDefault(value, fallback string) string {
