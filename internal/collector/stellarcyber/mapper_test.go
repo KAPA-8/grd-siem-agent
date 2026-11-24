@@ -384,3 +384,44 @@ func TestTruncateRunes(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// TestSourceState mirrors stellarSourceState in the app: the case status wins
+// over event_status, fairExcluded is only reported when true (Ignored alert or
+// a case status other than the collected ones), and no status means no state.
+func TestSourceState(t *testing.T) {
+	cases := []struct {
+		name         string
+		eventStatus  any
+		caseStatus   string
+		wantStatus   string
+		wantExcluded bool
+	}{
+		{"no status", nil, "", "", false},
+		{"blank status", "   ", "", "", false},
+		{"non-text status", 3, "", "", false},
+		{"new alert", "New", "", "new", false},
+		{"ignored alert", " IGNORED ", "", "ignored", true},
+		{"starts with Ignored", "Ignored later", "", "ignored later", false},
+		{"case status wins", "New", "Resolved", "resolved", false},
+		{"ignored alert in a counted case", "Ignored", "In Progress", "in progress", true},
+		{"cancelled case", "New", "Cancelled", "cancelled", true},
+		{"unknown case status", "New", " Closed ", "closed", true},
+		{"case status without alert status", nil, "escalated", "escalated", false},
+		{"blank case status falls back to the alert", "Ignored", "  ", "ignored", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := map[string]any{}
+			if tc.eventStatus != nil {
+				s["event_status"] = tc.eventStatus
+			}
+			status, excluded := sourceState(s, tc.caseStatus)
+			if status != tc.wantStatus {
+				t.Errorf("sourceStatus = %q, want %q", status, tc.wantStatus)
+			}
+			if tc.wantExcluded != (excluded != nil) || (excluded != nil && !*excluded) {
+				t.Errorf("fairExcluded = %v, want only true when excluded (%v)", excluded, tc.wantExcluded)
+			}
+		})
+	}
+}

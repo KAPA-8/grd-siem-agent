@@ -11,7 +11,6 @@
     "assetName": "mail-gw-01",
     "tactic": "TA0001",
     "sourceStatus": "new",
-    "fairExcluded": false,
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.28-000001",
@@ -47,7 +46,6 @@
     "assetName": "dc-01",
     "tactic": "TA0006",
     "sourceStatus": "in progress",
-    "fairExcluded": false,
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.28-000001",
@@ -78,7 +76,6 @@
     "assetName": "ws-042",
     "tactic": "XTA0006",
     "sourceStatus": "new",
-    "fairExcluded": false,
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantB-2026.10.27-000002",
@@ -110,7 +107,6 @@
     "assetName": "fileserver-02",
     "tactic": "TA0010",
     "sourceStatus": "closed",
-    "fairExcluded": false,
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.26-000003",
@@ -136,7 +132,6 @@
     "alertDate": "2026-10-25",
     "severity": "info",
     "sourceStatus": "new",
-    "fairExcluded": false,
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.25-000004",
@@ -183,7 +178,6 @@
     "severity": "high",
     "tactic": "TA0040",
     "sourceStatus": "new",
-    "fairExcluded": false,
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.29-000005",
@@ -209,7 +203,6 @@
     "alertDate": "2026-10-29",
     "severity": "info",
     "tactic": "Command and Control",
-    "fairExcluded": false,
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.29-000005",

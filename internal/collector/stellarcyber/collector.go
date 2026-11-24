@@ -27,7 +27,6 @@ import (
 
 	"github.com/grd-platform/grd-siem-agent/internal/collector"
 	"github.com/grd-platform/grd-siem-agent/internal/config"
-	"github.com/grd-platform/grd-siem-agent/internal/models"
 	"github.com/grd-platform/grd-siem-agent/internal/siemhttp"
 )
 
@@ -785,17 +784,13 @@ func (c *Collector) appendMapped(batch *collector.Batch, hit Hit, extra map[stri
 
 // appendCaseAlert maps an alert of a case: its source status is the case's
 // status (DESIGN 2026-11-24 §0.5), and it is fairExcluded when the alert is
-// Ignored or the case Cancelled.
+// Ignored or the case is not one of caseStatuses (Cancelled…); see sourceState.
 func (c *Collector) appendCaseAlert(batch *collector.Batch, hit Hit, extra map[string]any, caseStatus string) {
 	template, _, err := MapHit(hit, extra)
 	if err != nil {
 		log.Warn().Str("id", hit.ID).Err(err).Msg("stellar cyber: skipping alert")
 		return
 	}
-	if status := models.NormalizeSourceStatus(caseStatus); status != "" {
-		template.SourceStatus = status
-	}
-	excluded := (template.FairExcluded != nil && *template.FairExcluded) || strings.EqualFold(strings.TrimSpace(caseStatus), cancelledCaseStatus)
-	template.FairExcluded = models.Bool(excluded)
+	template.SourceStatus, template.FairExcluded = sourceState(hit.Source, caseStatus)
 	batch.Templates = append(batch.Templates, template)
 }

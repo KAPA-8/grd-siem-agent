@@ -123,10 +123,12 @@ type AlertImportTemplate struct {
 	SourceStatus string `json:"sourceStatus,omitempty"`
 	// FairExcluded reports that the source discarded the alert (false
 	// positive, ignored...): the platform stores it but leaves it out of the
-	// FAIR frequency. It is a pointer so an explicit false is sent too: a
-	// reopened alert must clear the flag stored for it, while collectors that
-	// do not track the source status (QRadar) leave it nil and never touch the
-	// stored value.
+	// FAIR frequency. It is a pointer so a collector can send an explicit
+	// false (FortiSIEM does, as its shared parity fixture encodes). Stellar
+	// Cyber only sends true, like the app's mapper: when a template reports a
+	// sourceStatus the platform treats a missing fairExcluded as false, so a
+	// reopened alert counts again. Collectors that do not track the source
+	// status (QRadar) leave both empty and never touch the stored value.
 	FairExcluded *bool `json:"fairExcluded,omitempty"`
 	// SignalClass is "threat_event" (the platform default) or "exposure".
 	SignalClass string `json:"signalClass,omitempty"`

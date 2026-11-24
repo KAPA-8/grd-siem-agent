@@ -39,8 +39,8 @@ type Hit struct {
 var errNoEventTime = errors.New("alert has no usable timestamp (timestamp, alert_time, stellar.alert_time, write_time)")
 
 // MapHit converts an alert hit into the platform's AlertImportTemplate and
-// returns the alert's event time. sourceStatus is event_status in lower case
-// and fairExcluded is set (true or false) from whether the alert is Ignored. extra is merged into rawData (cases mode
+// returns the alert's event time. sourceStatus and fairExcluded come from
+// sourceState (fairExcluded only when Ignored). extra is merged into rawData (cases mode
 // passes caseId and caseName). It fails only when the alert has no usable
 // event time, since the platform cannot import an alert without a date.
 func MapHit(hit Hit, extra map[string]any) (models.AlertImportTemplate, time.Time, error) {
@@ -68,11 +68,49 @@ func MapHit(hit Hit, extra map[string]any) (models.AlertImportTemplate, time.Tim
 		DestinationIP: str(s["dstip"]),
 		AssetName:     firstNonEmpty(str(s["hostname"]), str(s["host"]), str(s["dstip_host"]), str(s["srcip_host"])),
 		Tactic:        firstNonEmpty(str(tac["id"]), str(tac["name"])),
-		SourceStatus:  models.NormalizeSourceStatus(str(s["event_status"])),
-		FairExcluded:  models.Bool(strings.EqualFold(str(s["event_status"]), ignoredStatus)),
 		RawData:       rawData(hit, s, x, tech, tac, extra),
 	}
+	template.SourceStatus, template.FairExcluded = sourceState(s, "")
 	return template, eventTime, nil
+}
+
+// countedCaseStatuses are the case statuses whose alerts count in FAIR: the
+// ones collected (caseStatuses), compared in lower case.
+var countedCaseStatuses = func() map[string]bool {
+	m := make(map[string]bool, len(caseStatuses))
+	for _, status := range caseStatuses {
+		m[strings.ToLower(status)] = true
+	}
+	return m
+}()
+
+// sourceState is the alert's state at the source (DESIGN 2026-11-24 §0.5),
+// identical to stellarSourceState in the app (lib/integrations/siem/stellar-cyber/mapper.ts):
+//   - sourceStatus is the case status (cases mode) or else event_status, trimmed
+//     and in lower case. With neither (or when they are not text) no state is
+//     reported and both return values are empty.
+//   - fairExcluded is true when event_status is Ignored (case and surrounding
+//     spaces ignored) or the case status is not one of caseStatuses (Cancelled…).
+//     It is only sent when true (omitempty, as in the design): when a state is
+//     reported the platform treats its absence as false, so an alert reopened
+//     at the source counts again. The shared parity fixtures encode this.
+func sourceState(s map[string]any, caseStatus string) (string, *bool) {
+	alertStatus := str(s["event_status"])
+	caseStatus = strings.TrimSpace(caseStatus)
+	status := caseStatus
+	if status == "" {
+		status = alertStatus
+	}
+	if status == "" {
+		return "", nil
+	}
+	ignored := alertStatus != "" && strings.EqualFold(alertStatus, ignoredStatus)
+	caseDiscarded := caseStatus != "" && !countedCaseStatuses[strings.ToLower(caseStatus)]
+	var excluded *bool
+	if ignored || caseDiscarded {
+		excluded = models.Bool(true)
+	}
+	return models.NormalizeSourceStatus(status), excluded
 }
 
 // techniqueAndTactic returns x.technique / x.tactic when they are objects,

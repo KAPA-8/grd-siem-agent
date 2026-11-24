@@ -1,5 +1,5 @@
 {
-  "description": "Casos límite del mapeo Stellar Cyber (fechas, _id, _index). \"expected\" es la salida real de MapHit del agente Go (internal/collector/stellarcyber/mapper.go, rama feat/stellar-cyber-collector); null = el agente descarta el hit. El mapper TS debe producir exactamente lo mismo.",
+  "description": "Casos límite del mapeo Stellar Cyber (fechas, _id, _index). \"expected\" es la salida real de MapHit del agente Go (internal/collector/stellarcyber/mapper.go, rama feat/stellar-cyber-collector); null = el agente descarta el hit. El mapper TS debe producir exactamente lo mismo. Estado en el origen (diseño FortiSIEM/SOCRadar §0.5): sourceStatus = event_status recortado y en minúsculas (solo si es texto no vacío); fairExcluded = true solo si ese estado es \"ignored\" (si no, la clave se omite, como omitempty en Go).",
   "cases": [
     {
       "name": "timestamp negativo → usa write_time",
@@ -17,7 +17,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -41,7 +40,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -65,7 +63,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -88,7 +85,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-29",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -110,7 +106,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-26",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -133,7 +128,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -157,7 +151,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -181,7 +174,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -205,7 +197,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -229,7 +220,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -253,7 +243,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -277,7 +266,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -300,7 +288,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-25",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -322,7 +309,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-26",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -345,7 +331,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -368,7 +353,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-24",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -390,7 +374,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-25",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -412,7 +395,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-26",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -434,7 +416,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-25",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -457,7 +438,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -480,7 +460,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-25",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -503,7 +482,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -526,7 +504,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "0001-01-01",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -548,7 +525,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-25",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -571,7 +547,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber",
@@ -594,7 +569,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -616,7 +590,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": "aella-ser-1",
           "source": "stellar_cyber"
@@ -638,7 +611,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "source": "stellar_cyber"
         }
@@ -658,7 +630,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "source": "stellar_cyber"
         }
@@ -679,7 +650,6 @@
         "description": "Stellar Cyber alert",
         "alertDate": "2026-10-28",
         "severity": "info",
-        "fairExcluded": false,
         "rawData": {
           "index": " idx ",
           "source": "stellar_cyber"
@@ -706,6 +676,174 @@
         "_id": "e32"
       },
       "expected": null
+    },
+    {
+      "name": "event_status Ignored → sourceStatus ignored y fairExcluded",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "s01",
+        "_source": {
+          "timestamp": 1793196390000,
+          "event_status": "Ignored"
+        }
+      },
+      "expected": {
+        "externalId": "s01",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "sourceStatus": "ignored",
+        "fairExcluded": true,
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "status": "Ignored"
+        }
+      }
+    },
+    {
+      "name": "event_status IGNORED con espacios → recortado, minúsculas y fairExcluded",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "s02",
+        "_source": {
+          "timestamp": 1793196390000,
+          "event_status": "  IGNORED "
+        }
+      },
+      "expected": {
+        "externalId": "s02",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "sourceStatus": "ignored",
+        "fairExcluded": true,
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "status": "  IGNORED "
+        }
+      }
+    },
+    {
+      "name": "event_status In Progress → sourceStatus in progress, sin fairExcluded",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "s03",
+        "_source": {
+          "timestamp": 1793196390000,
+          "event_status": "In Progress"
+        }
+      },
+      "expected": {
+        "externalId": "s03",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "sourceStatus": "in progress",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "status": "In Progress"
+        }
+      }
+    },
+    {
+      "name": "event_status Closed → sourceStatus closed, sin fairExcluded",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "s04",
+        "_source": {
+          "timestamp": 1793196390000,
+          "event_status": "Closed"
+        }
+      },
+      "expected": {
+        "externalId": "s04",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "sourceStatus": "closed",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "status": "Closed"
+        }
+      }
+    },
+    {
+      "name": "event_status en blanco → sin estado (rawData.status tal cual)",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "s05",
+        "_source": {
+          "timestamp": 1793196390000,
+          "event_status": "   "
+        }
+      },
+      "expected": {
+        "externalId": "s05",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "status": "   "
+        }
+      }
+    },
+    {
+      "name": "event_status no texto → sin estado (rawData.status tal cual)",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "s06",
+        "_source": {
+          "timestamp": 1793196390000,
+          "event_status": 3
+        }
+      },
+      "expected": {
+        "externalId": "s06",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "status": 3
+        }
+      }
+    },
+    {
+      "name": "event_status que solo empieza por Ignored → no es Ignored",
+      "hit": {
+        "_index": "aella-ser-1",
+        "_id": "s07",
+        "_source": {
+          "timestamp": 1793196390000,
+          "event_status": "Ignored later"
+        }
+      },
+      "expected": {
+        "externalId": "s07",
+        "techniqueId": "T0000",
+        "description": "Stellar Cyber alert",
+        "alertDate": "2026-10-28",
+        "severity": "info",
+        "sourceStatus": "ignored later",
+        "rawData": {
+          "index": "aella-ser-1",
+          "source": "stellar_cyber",
+          "status": "Ignored later"
+        }
+      }
     }
   ]
 }

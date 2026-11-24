@@ -305,10 +305,11 @@ func TestCollectAlerts_FiltersSentToServer(t *testing.T) {
 	}
 	// Ignored alerts are collected and marked: the platform never inserts a
 	// new one, and one marked Ignored later leaves the FAIR frequency.
+	// fairExcluded is only sent when true (omitempty, as the app's mapper).
 	for _, tpl := range batch.Templates {
-		excluded := tpl.FairExcluded != nil && *tpl.FairExcluded
 		wantStatus := map[string]string{"ignored": "ignored", "no-status": "", "ok": "new"}[tpl.ExternalID]
-		if excluded != (tpl.ExternalID == "ignored") || tpl.FairExcluded == nil || tpl.SourceStatus != wantStatus {
+		wantExcluded := tpl.ExternalID == "ignored"
+		if (tpl.FairExcluded != nil) != wantExcluded || (wantExcluded && !*tpl.FairExcluded) || tpl.SourceStatus != wantStatus {
 			t.Errorf("%s: sourceStatus %q fairExcluded %v", tpl.ExternalID, tpl.SourceStatus, tpl.FairExcluded)
 		}
 	}
