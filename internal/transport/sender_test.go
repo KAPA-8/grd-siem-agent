@@ -100,7 +100,7 @@ func TestSendSync_ParsesDuplicatesAndTypedErrors(t *testing.T) {
 			w.Write([]byte(strings.Repeat("x", 10000)))
 			return
 		}
-		w.Write([]byte(`{"success":true,"sync_log_id":"s1","import_id":null,"alerts_imported":3,"alerts_skipped":0,"alerts_duplicate":2,"alerts_errors":0,"limit_reached":false,"new_field":1}`))
+		w.Write([]byte(`{"success":true,"sync_log_id":"s1","import_id":null,"alerts_imported":3,"alerts_skipped":0,"alerts_duplicate":2,"alerts_errors":0,"alerts_excluded":4,"alerts_status_updated":5,"limit_reached":false,"new_field":1}`))
 	}))
 	defer server.Close()
 
@@ -109,7 +109,7 @@ func TestSendSync_ParsesDuplicatesAndTypedErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.AlertsImported != 3 || resp.AlertsDuplicate != 2 || resp.ImportID != "" || !resp.Success {
+	if resp.AlertsImported != 3 || resp.AlertsDuplicate != 2 || resp.ImportID != "" || !resp.Success || resp.AlertsExcluded != 4 || resp.AlertsStatusUpdated != 5 {
 		t.Errorf("resp = %+v", resp)
 	}
 

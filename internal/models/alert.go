@@ -1,6 +1,9 @@
 package models
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Severity represents normalized alert severity levels.
 type Severity string
@@ -114,6 +117,48 @@ type AlertImportTemplate struct {
 	ImpactType string `json:"impactType,omitempty"`
 	// Tactic is a MITRE tactic ID (TA0010), name (Exfiltration) or snake_case name.
 	Tactic string `json:"tactic,omitempty"`
+	// SourceStatus is the alert's normalized status in the source SIEM
+	// (lowercase, at most 64 characters), e.g. "new", "ignored" or
+	// "manually_cleared/false_positive". Empty when the source has none.
+	SourceStatus string `json:"sourceStatus,omitempty"`
+	// FairExcluded reports that the source discarded the alert (false
+	// positive, ignored...): the platform stores it but leaves it out of the
+	// FAIR frequency. It is a pointer so an explicit false is sent too: a
+	// reopened alert must clear the flag stored for it, while collectors that
+	// do not track the source status (QRadar) leave it nil and never touch the
+	// stored value.
+	FairExcluded *bool `json:"fairExcluded,omitempty"`
+	// SignalClass is "threat_event" (the platform default) or "exposure".
+	SignalClass string `json:"signalClass,omitempty"`
+	// StatusOnly marks an alert first seen outside the import window: the
+	// platform only refreshes its stored status and never inserts it.
+	StatusOnly bool `json:"statusOnly,omitempty"`
 	// RawData is compact source metadata stored in cyberrisk_alert_records.raw_data.
 	RawData map[string]any `json:"rawData,omitempty"`
 }
+
+// Signal classes of AlertImportTemplate.SignalClass.
+const (
+	SignalClassThreatEvent = "threat_event"
+	SignalClassExposure    = "exposure"
+)
+
+// MaxSourceStatusLength is the size of cyberrisk_alert_records.source_status.
+const MaxSourceStatusLength = 64
+
+// NormalizeSourceStatus lowercases and trims a source status and cuts it to
+// MaxSourceStatusLength characters, as the platform stores it.
+func NormalizeSourceStatus(status string) string {
+	s := strings.ToLower(strings.TrimSpace(status))
+	count := 0
+	for i := range s {
+		if count == MaxSourceStatusLength {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}
+
+// Bool returns a pointer to b, for AlertImportTemplate.FairExcluded.
+func Bool(b bool) *bool { return &b }

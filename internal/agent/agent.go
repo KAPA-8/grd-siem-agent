@@ -414,6 +414,8 @@ func acceptSyncResponse(resp *models.SyncResponse, chunk, chunks int) bool {
 		Int("alerts_skipped", resp.AlertsSkipped).
 		Int("alerts_errors", resp.AlertsErrors).
 		Int("alerts_rejected", resp.AlertsRejected).
+		Int("alerts_excluded", resp.AlertsExcluded).
+		Int("alerts_status_updated", resp.AlertsStatusUpdated).
 		Bool("limit_reached", resp.LimitReached).
 		Msg("sync response")
 
