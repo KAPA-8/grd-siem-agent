@@ -39,7 +39,8 @@ type Hit struct {
 var errNoEventTime = errors.New("alert has no usable timestamp (timestamp, alert_time, stellar.alert_time, write_time)")
 
 // MapHit converts an alert hit into the platform's AlertImportTemplate and
-// returns the alert's event time. extra is merged into rawData (cases mode
+// returns the alert's event time. sourceStatus is event_status in lower case
+// and fairExcluded is set (true or false) from whether the alert is Ignored. extra is merged into rawData (cases mode
 // passes caseId and caseName). It fails only when the alert has no usable
 // event time, since the platform cannot import an alert without a date.
 func MapHit(hit Hit, extra map[string]any) (models.AlertImportTemplate, time.Time, error) {
@@ -67,6 +68,8 @@ func MapHit(hit Hit, extra map[string]any) (models.AlertImportTemplate, time.Tim
 		DestinationIP: str(s["dstip"]),
 		AssetName:     firstNonEmpty(str(s["hostname"]), str(s["host"]), str(s["dstip_host"]), str(s["srcip_host"])),
 		Tactic:        firstNonEmpty(str(tac["id"]), str(tac["name"])),
+		SourceStatus:  models.NormalizeSourceStatus(str(s["event_status"])),
+		FairExcluded:  models.Bool(strings.EqualFold(str(s["event_status"]), ignoredStatus)),
 		RawData:       rawData(hit, s, x, tech, tac, extra),
 	}
 	return template, eventTime, nil

@@ -12,10 +12,17 @@ import (
 // search only: user-scoped keys accept Lucene but not a DSL body.
 
 const (
-	fieldWriteTime   = "write_time"
-	fieldModifiedAt  = "modified_at"
-	ignoredStatus    = "Ignored" // Stellar Cyber's "false positive" alert status
-	probeAlertsQuery = "fidelity:<0"
+	fieldWriteTime  = "write_time"
+	fieldModifiedAt = "modified_at"
+	// ignoredStatus is Stellar Cyber's "false positive" alert status. Ignored
+	// alerts are collected and marked fairExcluded (DESIGN 2026-11-24 §0.5):
+	// the platform never inserts a new one, and an alert marked Ignored later
+	// leaves the FAIR frequency.
+	ignoredStatus = "Ignored"
+	// cancelledCaseStatus is the "false positive" case status. Cancelled
+	// cases are not listed (caseStatuses); their alerts would be fairExcluded.
+	cancelledCaseStatus = "Cancelled"
+	probeAlertsQuery    = "fidelity:<0"
 )
 
 // caseStatuses are queried one by one: some versions exclude Resolved when no
@@ -28,8 +35,8 @@ func rangeClause(field string, fromMs, toMs int64) string {
 }
 
 // buildAlertsQuery joins the window clause with the optional minimum score
-// and tenant filters and the exclusion of Ignored alerts. Alerts without an
-// event_status still match.
+// and tenant filters. Ignored alerts are not excluded: the mapper marks them
+// fairExcluded.
 func buildAlertsQuery(window string, minScore int, tenantID string) string {
 	parts := []string{window}
 	if minScore > 0 {
@@ -38,7 +45,6 @@ func buildAlertsQuery(window string, minScore int, tenantID string) string {
 	if tenantID != "" {
 		parts = append(parts, "tenantid:"+quoteLucene(tenantID))
 	}
-	parts = append(parts, "NOT event_status:"+quoteLucene(ignoredStatus))
 	return strings.Join(parts, " AND ")
 }
 

@@ -7,7 +7,7 @@ import (
 
 func TestBuildAlertsQuery_SpecExample(t *testing.T) {
 	got := buildAlertsQuery(rangeClause("timestamp", 1761955200000, 1762560000000), 40, "abc")
-	want := `timestamp:[1761955200000 TO 1762560000000} AND event_score:>=40 AND tenantid:"abc" AND NOT event_status:"Ignored"`
+	want := `timestamp:[1761955200000 TO 1762560000000} AND event_score:>=40 AND tenantid:"abc"`
 	if got != want {
 		t.Errorf("got  %s\nwant %s", got, want)
 	}
@@ -15,12 +15,12 @@ func TestBuildAlertsQuery_SpecExample(t *testing.T) {
 
 func TestBuildAlertsQuery_OptionalParts(t *testing.T) {
 	got := buildAlertsQuery(rangeClause(fieldWriteTime, 1, 2), 0, "")
-	want := `write_time:[1 TO 2} AND NOT event_status:"Ignored"`
+	want := `write_time:[1 TO 2}`
 	if got != want {
 		t.Errorf("got %s, want %s", got, want)
 	}
 	got = buildAlertsQuery(rangeClause(fieldWriteTime, 1, 2), 0, `we"ird\tenant`)
-	want = `write_time:[1 TO 2} AND tenantid:"we\"ird\\tenant" AND NOT event_status:"Ignored"`
+	want = `write_time:[1 TO 2} AND tenantid:"we\"ird\\tenant"`
 	if got != want {
 		t.Errorf("got %s, want %s", got, want)
 	}

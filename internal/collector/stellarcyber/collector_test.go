@@ -81,7 +81,7 @@ func TestCollectAlerts_FirstRunWindowQueryAndLag(t *testing.T) {
 		t.Fatalf("search requests = %d", len(reqs))
 	}
 	q := reqs[0].Query
-	wantQ := fmt.Sprintf(`write_time:[%d TO %d} AND NOT event_status:"Ignored"`, lower, upper)
+	wantQ := fmt.Sprintf(`write_time:[%d TO %d}`, lower, upper)
 	if q.Get("q") != wantQ || q.Get("sort") != "write_time:asc" || q.Get("from") != "0" || q.Get("size") != "500" || q.Get("track_total_hits") != "true" {
 		t.Errorf("query = %v\nwant q = %s", q, wantQ)
 	}
@@ -300,11 +300,20 @@ func TestCollectAlerts_FiltersSentToServer(t *testing.T) {
 	env.addAlerts(alertHit("low", ts, 39.99), ignored, noStatus, otherTenant, alertHit("ok", ts+4, 80))
 
 	batch := mustCollect(t, env.coll, "")
-	if got := externalIDs(batch); !reflect.DeepEqual(got, []string{"no-status", "ok"}) {
-		t.Fatalf("collected %v, want [no-status ok]", got)
+	if got := externalIDs(batch); !reflect.DeepEqual(got, []string{"ignored", "no-status", "ok"}) {
+		t.Fatalf("collected %v, want [ignored no-status ok]", got)
+	}
+	// Ignored alerts are collected and marked: the platform never inserts a
+	// new one, and one marked Ignored later leaves the FAIR frequency.
+	for _, tpl := range batch.Templates {
+		excluded := tpl.FairExcluded != nil && *tpl.FairExcluded
+		wantStatus := map[string]string{"ignored": "ignored", "no-status": "", "ok": "new"}[tpl.ExternalID]
+		if excluded != (tpl.ExternalID == "ignored") || tpl.FairExcluded == nil || tpl.SourceStatus != wantStatus {
+			t.Errorf("%s: sourceStatus %q fairExcluded %v", tpl.ExternalID, tpl.SourceStatus, tpl.FairExcluded)
+		}
 	}
 	q := env.mock.recorded(searchPath)[0].Query.Get("q")
-	if !strings.Contains(q, ` AND event_score:>=40 AND tenantid:"tenantA" AND NOT event_status:"Ignored"`) {
+	if !strings.HasSuffix(q, ` AND event_score:>=40 AND tenantid:"tenantA"`) || strings.Contains(q, "Ignored") {
 		t.Errorf("q = %s", q)
 	}
 }
@@ -355,11 +364,12 @@ func TestCollectAlerts_DuplicatesAndOutOfWindowHits(t *testing.T) {
 	}
 }
 
-// Regression (review P2): an alert on page 1 is marked Ignored while page 2
-// is being requested. With from/size offsets every later alert shifted one
-// place left and a0500 was never collected; anchored pages lose nothing.
+// Regression (review P2): an alert on page 1 leaves the result set (its score
+// drops below min_severity) while page 2 is being requested. With from/size
+// offsets every later alert shifted one place left and a0500 was never
+// collected; anchored pages lose nothing.
 func TestCollectAlerts_AlertLeavingTheResultSetWhilePagingIsNotLost(t *testing.T) {
-	env := newSaaSEnv(t, nil)
+	env := newSaaSEnv(t, func(_ *settings, sc *config.SyncConfig) { sc.Filters.MinSeverity = "low" })
 	var once sync.Once
 	searches := 0
 	env.mock.onRequest = func(m *mockStellar, r *http.Request) {
@@ -369,7 +379,7 @@ func TestCollectAlerts_AlertLeavingTheResultSetWhilePagingIsNotLost(t *testing.T
 		if searches++; searches == 2 {
 			once.Do(func() {
 				m.mu.Lock()
-				m.alerts[10].Source["event_status"] = "Ignored"
+				m.alerts[10].Source["event_score"] = 5
 				m.mu.Unlock()
 			})
 		}
@@ -514,8 +524,15 @@ func TestCollectCases_PerStatusQueriesAndAlertPaging(t *testing.T) {
 	)
 
 	batch := mustCollect(t, env.coll, "")
-	if len(batch.Templates) != 121 {
-		t.Fatalf("collected %d alerts, want 120 from c1 + c2-ok", len(batch.Templates))
+	if len(batch.Templates) != 122 {
+		t.Fatalf("collected %d alerts, want 120 from c1 + c2-ignored + c2-ok", len(batch.Templates))
+	}
+	for _, tpl := range batch.Templates {
+		wantStatus := map[bool]string{true: "resolved", false: "new"}[strings.HasPrefix(tpl.ExternalID, "c2-")]
+		excluded := tpl.FairExcluded != nil && *tpl.FairExcluded
+		if tpl.SourceStatus != wantStatus || excluded != (tpl.ExternalID == "c2-ignored") {
+			t.Errorf("%s: sourceStatus %q fairExcluded %v, want the case status and only the Ignored alert excluded", tpl.ExternalID, tpl.SourceStatus, excluded)
+		}
 	}
 	last := batch.Templates[len(batch.Templates)-1]
 	if last.ExternalID != "c2-ok" || last.RawData["caseId"] != "c2" || last.RawData["caseName"] != "Mixed" {
