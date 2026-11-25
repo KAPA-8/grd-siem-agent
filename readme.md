@@ -333,7 +333,12 @@ sudo -u grd-agent /opt/grd-siem-agent/grd-siem-agent validate --config /etc/grd-
 sudo systemctl start grd-siem-agent
 ```
 
-To keep the password out of `config.yaml` with systemd, `sudo systemctl edit grd-siem-agent` and add `Environment="GRD_SIEM_PASSWORD=..."` under `[Service]` (systemd treats `%`, `\` and quotes specially there: for such passwords prefer the single-quoted value in `config.yaml`, which is readable only by root and `grd-agent`).
+To keep the password out of `config.yaml` with systemd, `sudo systemctl edit grd-siem-agent` and add `Environment="GRD_SIEM_PASSWORD=..."` under `[Service]` (systemd treats `%`, `\` and quotes specially there: write `%%` for each `%` and `\\` for each `\`, and for passwords with double quotes prefer the single-quoted value in `config.yaml`, which is readable only by root and `grd-agent`). `test-siem` and `validate` run through `sudo` do not see the service's `Environment=`: pass the password to them explicitly, without leaving it in the shell history:
+
+```bash
+read -rs GRD_SIEM_PASSWORD
+sudo -u grd-agent env GRD_SIEM_PASSWORD="$GRD_SIEM_PASSWORD" /opt/grd-siem-agent/grd-siem-agent test-siem --config /etc/grd-siem-agent/config.yaml
+```
 
 Windows (Administrator PowerShell):
 
@@ -343,6 +348,15 @@ notepad "C:\ProgramData\GRD SIEM Agent\config.yaml"
 & "C:\Program Files\GRD SIEM Agent\grd-siem-agent.exe" test-siem --config "C:\ProgramData\GRD SIEM Agent\config.yaml"
 & "C:\Program Files\GRD SIEM Agent\grd-siem-agent.exe" validate --config "C:\ProgramData\GRD SIEM Agent\config.yaml"
 Start-Service GRDSIEMAgent
+```
+
+To keep the password out of `config.yaml` on Windows, store it as an environment variable of the service itself, which `Restart-Service` applies (a new system variable set with `[Environment]::SetEnvironmentVariable(..., 'Machine')` does not reach a service until Windows restarts, nor the PowerShell window that is already open):
+
+```powershell
+New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\GRDSIEMAgent' -Name Environment -PropertyType MultiString -Value 'GRD_SIEM_PASSWORD=your-password' -Force
+Restart-Service GRDSIEMAgent
+# test-siem / validate in this console do not see the service variable: set it for the session
+$env:GRD_SIEM_PASSWORD = 'your-password'
 ```
 
 `test-siem` authenticates and queries one incident of the last 24 hours; `--collect` also runs one collection over the lookback window and prints how many incidents it would send (`--output file.json` writes them for inspection). No checkpoint is saved.
