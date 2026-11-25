@@ -111,7 +111,8 @@ func TestPartition_UnstablePagingRegression(t *testing.T) {
 }
 
 // More than a page of incidents last seen in the same second cannot be split:
-// it is paged by incidentId and read again until two reads agree.
+// it is paged by incidentId and read again until the union holds total
+// incidents (or two reads in a row add none).
 func TestPartition_DenseSecondIsReadUntilStable(t *testing.T) {
 	bothProfiles(t, func(t *testing.T, profile mockProfile) {
 		env := newEnv(t, profile, func(_ *settings, s *config.SyncConfig) { s.MaxAlertsPerSync = 10000 })
@@ -132,8 +133,8 @@ func TestPartition_DenseSecondIsReadUntilStable(t *testing.T) {
 				}
 			}
 		}
-		if paged < 2*3 { // at least two reads of four pages (start 100, 200, 300)
-			t.Errorf("paged queries = %d, want two full reads", paged)
+		if paged < 3 { // at least one full read of four pages (start 100, 200, 300)
+			t.Errorf("paged queries = %d, want a full read", paged)
 		}
 	})
 }
@@ -147,6 +148,68 @@ func TestPartition_DenseFallsBackWhenOrderByIncidentIDIsRejected(t *testing.T) {
 	checkOnce(t, "dense without orderBy incidentId", ids, want)
 	if env.coll.denseOrderBy != orderByLastSeen {
 		t.Errorf("denseOrderBy = %s", env.coll.denseOrderBy)
+	}
+}
+
+// A server that caps its pages below the size asked for sets the real
+// capacity: the window is split by it, never paged.
+func TestPartition_ServerCapsPages(t *testing.T) {
+	bothProfiles(t, func(t *testing.T, profile mockProfile) {
+		env := newEnv(t, profile, func(_ *settings, s *config.SyncConfig) { s.MaxAlertsPerSync = 10000 })
+		env.coll.pageSize = 100
+		env.mock.maxPage = 60
+		want := tiedIncidents(env, 1000, 300, 4)
+		ids, _ := env.collect(t, "")
+		checkOnce(t, "capped pages", ids, want)
+		for i, r := range env.mock.recorded(incidentPath) {
+			if r.Query.Start != 0 {
+				t.Fatalf("query %d paged (start=%d)", i, r.Query.Start)
+			}
+		}
+	})
+}
+
+// Without total a full page means "maybe more": the window is split until
+// every subwindow comes back shorter than a page.
+func TestPartition_WithoutTotal(t *testing.T) {
+	bothProfiles(t, func(t *testing.T, profile mockProfile) {
+		env := newEnv(t, profile, func(_ *settings, s *config.SyncConfig) { s.MaxAlertsPerSync = 10000 })
+		env.coll.pageSize = 100
+		env.mock.omitTotal = true
+		env.mock.setUnstable(5, 3)
+		want := tiedIncidents(env, 1000, 1000, 5)
+		ids, _ := env.collect(t, "")
+		checkOnce(t, "without total", ids, want)
+		for i, r := range env.mock.recorded(incidentPath) {
+			if r.Query.Start != 0 {
+				t.Fatalf("query %d paged (start=%d)", i, r.Query.Start)
+			}
+		}
+	})
+}
+
+// A dense window whose total never matches (the server counts more than it
+// returns) stops after two reads in a row add nothing: three reads.
+func TestPartition_DenseStopsAfterTwoQuietReads(t *testing.T) {
+	env := newEnv(t, profileCloud, func(_ *settings, s *config.SyncConfig) { s.MaxAlertsPerSync = 10000 })
+	env.coll.pageSize = 100
+	env.mock.totalAdjust = func(q incidentQuery, total int) int {
+		if q.TimeTo-q.TimeFrom < minSplitWindow && total > 100 {
+			return total + 50
+		}
+		return total
+	}
+	want := tiedIncidents(env, 5000, 250, 250)
+	ids, _ := env.collect(t, "")
+	checkOnce(t, "dense, inconsistent total", ids, want)
+	reads := 0
+	for _, r := range env.mock.recorded(incidentPath) {
+		if r.Query.OrderBy == orderByIncidentID && r.Query.Start == 0 {
+			reads++
+		}
+	}
+	if reads != 3 {
+		t.Errorf("dense reads = %d, want 3 (one that adds, two that add nothing)", reads)
 	}
 }
 

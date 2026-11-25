@@ -26,8 +26,8 @@ import (
 // later subwindow not read yet: it is never lost, and the repeats are
 // deduplicated by incidentId. Only a window shorter than minSplitWindow that
 // still holds more than pageSize incidents (many incidents last seen in the
-// same second) is paged, by incidentId, and read again until two consecutive
-// reads agree.
+// same second) is paged, by incidentId, and read again until the union holds
+// total incidents or two reads in a row add none (at most four reads).
 //
 // Every window is delivered sorted by (incidentLastSeen, incidentId), so the
 // output of a scan is ordered by incidentLastSeen whatever order the server
@@ -86,25 +86,32 @@ func (c *Collector) scanWindow(ctx context.Context, from, to int64, sink *scanSi
 	if err != nil {
 		return false, err
 	}
-	// Without total (some versions may omit it) a full page means "maybe more".
-	fits := pg.Items < c.pageSize
+	// The window is complete when the page brought as many distinct incidents
+	// as its total (it may bring pageSize+1, §6.2). Without total (some
+	// versions may omit it) a page shorter than pageSize is the whole window.
+	distinct, invalid := pageIDs(pg.Data)
+	complete := pg.Items < c.pageSize
 	if pg.HasTotal {
-		fits = pg.Total <= int64(c.pageSize)
+		complete = int64(distinct+invalid+pg.Invalid) >= pg.Total
 	}
-	if fits {
-		if pg.HasTotal && int64(pg.Items) < pg.Total {
-			log.Warn().Int("items", pg.Items).Int64("total", pg.Total).Msg("fortisiem: a single-page window returned fewer incidents than its total")
-		}
+	if complete {
 		return deliver(pg.Data, pg.Invalid, from, to, sink), nil
 	}
 	if to-from < minSplitWindow {
 		return c.scanDense(ctx, from, to, sink)
 	}
+	// Without total a full page means "maybe more": split as if it held four
+	// pages, and every subwindow that comes back full again is split again.
 	total := pg.Total
 	if !pg.HasTotal {
 		total = int64(4 * c.pageSize)
 	}
-	k := int64(math.Ceil(float64(total) / (partitionFill * float64(c.pageSize))))
+	// A server that caps its pages below pageSize sets the real capacity.
+	capacity := c.pageSize
+	if pg.Items > 0 && pg.Items < c.pageSize {
+		capacity = pg.Items
+	}
+	k := int64(math.Ceil(float64(total) / (partitionFill * float64(capacity))))
 	span := to - from + 1
 	k = max(min(k, span/minSubwindow), 2)
 	for i := range k {
@@ -117,32 +124,62 @@ func (c *Collector) scanWindow(ctx context.Context, from, to int64, sink *scanSi
 	return false, nil
 }
 
+// pageIDs counts the distinct incidentIds of a page and its items without one.
+func pageIDs(data []map[string]any) (distinct, invalid int) {
+	ids := make(map[string]struct{}, len(data))
+	for _, inc := range data {
+		id := incidentID(inc["incidentId"])
+		if id == "" {
+			invalid++
+			continue
+		}
+		ids[id] = struct{}{}
+	}
+	return len(ids), invalid
+}
+
 // scanDense reads a window shorter than minSplitWindow that holds more than
-// a page: it pages it by incidentId and reads it again until a read adds no
-// incidentId to the union of the previous ones (at most maxDensePasses).
+// a page: it pages it by incidentId and reads it again, joining the reads,
+// until the union holds total incidentIds or two reads in a row add none
+// (at most maxDensePasses reads).
 func (c *Collector) scanDense(ctx context.Context, from, to int64, sink *scanSink) (bool, error) {
 	union := map[string]map[string]any{}
 	invalid := 0
-	stable := false
-	passes := 0
-	for passes < maxDensePasses && !stable {
+	complete := false
+	passes, quiet := 0, 0
+	var total int64
+	for passes < maxDensePasses {
 		passes++
-		added, inv, err := c.readDensePass(ctx, from, to, union)
+		r, err := c.readDensePass(ctx, from, to, union)
 		if err != nil {
 			return false, err
 		}
 		if passes == 1 {
-			invalid = inv
-		} else if added == 0 {
-			stable = true
+			invalid = r.invalid
+		}
+		if r.hasTotal {
+			total = r.total
+			if int64(len(union)+r.invalid) >= r.total {
+				complete = true
+				break
+			}
+		}
+		if r.added == 0 {
+			quiet++
+		} else {
+			quiet = 0
+		}
+		if quiet >= 2 {
+			complete = !r.hasTotal
+			break
 		}
 	}
 	event := log.Warn()
-	if stable {
+	if complete {
 		event = log.Info()
 	}
-	event.Time("from", time.UnixMilli(from).UTC()).Int("incidents", len(union)).Int("passes", passes).Bool("stable", stable).
-		Msg("fortisiem: more than one page of incidents last seen within one second; read it page by page until two reads agree")
+	event.Time("from", time.UnixMilli(from).UTC()).Int("incidents", len(union)).Int64("total", total).Int("passes", passes).Bool("complete", complete).
+		Msg("fortisiem: more than one page of incidents last seen within one second; read it page by page in several passes")
 	items := make([]map[string]any, 0, len(union))
 	for _, inc := range union {
 		items = append(items, inc)
@@ -150,34 +187,55 @@ func (c *Collector) scanDense(ctx context.Context, from, to int64, sink *scanSin
 	return deliver(items, invalid, from, to, sink), nil
 }
 
+// densePass is what one paged read of a dense window found.
+type densePass struct {
+	added, invalid int
+	total          int64
+	hasTotal       bool
+}
+
 // readDensePass pages [from, to] once, adding to union (the latest version of
-// each incident wins). It returns the incidentIds it added.
-func (c *Collector) readDensePass(ctx context.Context, from, to int64, union map[string]map[string]any) (added, invalid int, err error) {
+// each incident wins). It reports the incidentIds it added to the union.
+func (c *Collector) readDensePass(ctx context.Context, from, to int64, union map[string]map[string]any) (densePass, error) {
+	var r densePass
+	inPass := map[string]struct{}{}
 	for page, start := 0, 0; page < c.maxPages; page, start = page+1, start+c.pageSize {
 		pg, err := c.windowQuery(ctx, start, c.pageSize, from, to, c.denseOrderBy)
 		if err != nil {
-			return 0, 0, err
+			return densePass{}, err
+		}
+		if pg.HasTotal {
+			r.total, r.hasTotal = pg.Total, true
 		}
 		if pg.Items == 0 {
 			break
 		}
-		invalid += pg.Invalid
+		r.invalid += pg.Invalid
+		fresh := 0
 		for _, inc := range pg.Data {
 			id := incidentID(inc["incidentId"])
 			if id == "" {
-				invalid++
+				r.invalid++
 				continue
 			}
+			if _, ok := inPass[id]; !ok {
+				inPass[id] = struct{}{}
+				fresh++
+			}
 			if _, ok := union[id]; !ok {
-				added++
+				r.added++
 			}
 			union[id] = inc
 		}
 		if pg.HasTotal && int64(start+c.pageSize) >= pg.Total {
 			break
 		}
+		// A page with no incident new to this read: the server ignores start.
+		if fresh == 0 {
+			break
+		}
 	}
-	return added, invalid, nil
+	return r, nil
 }
 
 // windowQuery runs one incident query of a scan within the request budget.

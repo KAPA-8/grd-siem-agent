@@ -125,6 +125,12 @@ type mockFortiSIEM struct {
 	unstable      bool
 	unstableShift int
 	rng           *rand.Rand
+	// maxPage caps the incidents of a page below the size asked for.
+	maxPage int
+	// omitTotal answers without total (a version that does not send it).
+	omitTotal bool
+	// totalAdjust, when set, rewrites the total of an answer.
+	totalAdjust func(q incidentQuery, total int) int
 	// onQuery, when set, runs before each incident query is answered with
 	// the number of incident queries so far (1-based).
 	onQuery    func(n int)
@@ -397,6 +403,7 @@ func (m *mockFortiSIEM) handleIncidents(w http.ResponseWriter, q incidentQuery) 
 	}
 	first := q.Start
 	m.mu.Lock()
+	maxPage, omitTotal, adjust := m.maxPage, m.omitTotal, m.totalAdjust
 	if m.unstable {
 		shuffleTies(matched, key, m.rng)
 		if first > 0 && m.unstableShift > 0 {
@@ -408,22 +415,38 @@ func (m *mockFortiSIEM) handleIncidents(w http.ResponseWriter, q incidentQuery) 
 	if inclusive {
 		end++
 	}
+	if maxPage > 0 {
+		end = min(end, first+maxPage)
+	}
 	data := []any{}
 	for i := first; i < len(matched) && i < end; i++ {
 		data = append(data, m.render(matched[i]))
 	}
+	total := len(matched)
+	if adjust != nil {
+		total = adjust(q, total)
+	}
 	if m.profile == profile74 {
-		writeJSON(w, http.StatusOK, map[string]any{"start": q.Start, "total": strconv.Itoa(len(matched)), "data": data})
+		body := map[string]any{"start": q.Start, "total": strconv.Itoa(total), "data": data}
+		if omitTotal {
+			delete(body, "total")
+		}
+		writeJSON(w, http.StatusOK, body)
 		return
 	}
 	pages := 0
 	if size > 0 {
-		pages = (len(matched) + size - 1) / size
+		pages = (total + size - 1) / size
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"start": q.Start, "total": len(matched), "pages": pages, "sizePerPage": len(data),
+	body := map[string]any{
+		"start": q.Start, "total": total, "pages": pages, "sizePerPage": len(data),
 		"data": data, "queryId": "pub_inc_query_synthetic",
-	})
+	}
+	if omitTotal {
+		delete(body, "total")
+		delete(body, "pages")
+	}
+	writeJSON(w, http.StatusOK, body)
 }
 
 // shuffleTies reorders the runs of incidents that share the sort key.
