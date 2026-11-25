@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -112,19 +113,40 @@ type mockFortiSIEM struct {
 	tokenGetJSON bool
 	// rejectOrderByLastSeen answers 400 to orderBy incidentLastSeen.
 	rejectOrderByLastSeen bool
+	// rejectOrderByIncidentID answers 400 to orderBy incidentId.
+	rejectOrderByIncidentID bool
 	// htmlIncidents answers the incident query with an HTML page (200).
 	htmlIncidents bool
-	tokenTTL      time.Duration
-	tokens        map[string]time.Time
-	tokenSeq      int
-	tokenCalls    int
-	incidents     []mockIncident
-	failures      []injectedFailure
-	requests      []recordedRequest
+	// unstable reproduces FortiSIEM's unstable paging (DESIGN §10): on every
+	// call the incidents that share the sort key come in a new order and a
+	// page after the first starts up to unstableShift positions before or
+	// after start, so a paged read repeats some incidents and skips others.
+	// A page at start 0 still holds the first incidents of the window.
+	unstable      bool
+	unstableShift int
+	rng           *rand.Rand
+	// onQuery, when set, runs before each incident query is answered with
+	// the number of incident queries so far (1-based).
+	onQuery    func(n int)
+	queryCount int
+	tokenTTL   time.Duration
+	tokens     map[string]time.Time
+	tokenSeq   int
+	tokenCalls int
+	incidents  []mockIncident
+	failures   []injectedFailure
+	requests   []recordedRequest
 }
 
 func newMockFortiSIEM(t *testing.T, clock *fakeClock, profile mockProfile) *mockFortiSIEM {
 	return &mockFortiSIEM{t: t, clock: clock, profile: profile, tokenTTL: 24 * time.Hour, tokens: map[string]time.Time{}}
+}
+
+// setUnstable turns on the unstable paging with a fixed seed.
+func (m *mockFortiSIEM) setUnstable(seed int64, shift int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.unstable, m.unstableShift, m.rng = true, shift, rand.New(rand.NewSource(seed))
 }
 
 func (m *mockFortiSIEM) add(incs ...mockIncident) {
@@ -322,7 +344,15 @@ func (m *mockFortiSIEM) handleToken(w http.ResponseWriter, r *http.Request) {
 
 func (m *mockFortiSIEM) handleIncidents(w http.ResponseWriter, q incidentQuery) {
 	m.mu.Lock()
-	rejectLastSeen, html, inclusive := m.rejectOrderByLastSeen, m.htmlIncidents, m.inclusiveEnd
+	m.queryCount++
+	n, hook := m.queryCount, m.onQuery
+	m.mu.Unlock()
+	if hook != nil {
+		hook(n)
+	}
+
+	m.mu.Lock()
+	rejectLastSeen, rejectID, html, inclusive := m.rejectOrderByLastSeen, m.rejectOrderByIncidentID, m.htmlIncidents, m.inclusiveEnd
 	var matched []mockIncident
 	for _, inc := range m.incidents {
 		if inc.LastSeen >= q.TimeFrom && inc.LastSeen <= q.TimeTo { // FortiSIEM filters on lastSeen
@@ -344,6 +374,12 @@ func (m *mockFortiSIEM) handleIncidents(w http.ResponseWriter, q incidentQuery) 
 			return
 		}
 		key = func(inc mockIncident) int64 { return inc.LastSeen }
+	case orderByIncidentID:
+		if rejectID {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid orderBy"})
+			return
+		}
+		key = func(inc mockIncident) int64 { return inc.ID }
 	case orderByFirstSeen:
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid orderBy"})
@@ -359,12 +395,21 @@ func (m *mockFortiSIEM) handleIncidents(w http.ResponseWriter, q incidentQuery) 
 	if size > 1000 {
 		size = 1000
 	}
-	end := q.Start + size
+	first := q.Start
+	m.mu.Lock()
+	if m.unstable {
+		shuffleTies(matched, key, m.rng)
+		if first > 0 && m.unstableShift > 0 {
+			first = max(first+m.rng.Intn(2*m.unstableShift+1)-m.unstableShift, 0)
+		}
+	}
+	m.mu.Unlock()
+	end := first + size
 	if inclusive {
 		end++
 	}
 	data := []any{}
-	for i := q.Start; i < len(matched) && i < end; i++ {
+	for i := first; i < len(matched) && i < end; i++ {
 		data = append(data, m.render(matched[i]))
 	}
 	if m.profile == profile74 {
@@ -379,6 +424,19 @@ func (m *mockFortiSIEM) handleIncidents(w http.ResponseWriter, q incidentQuery) 
 		"start": q.Start, "total": len(matched), "pages": pages, "sizePerPage": len(data),
 		"data": data, "queryId": "pub_inc_query_synthetic",
 	})
+}
+
+// shuffleTies reorders the runs of incidents that share the sort key.
+func shuffleTies(incs []mockIncident, key func(mockIncident) int64, rng *rand.Rand) {
+	for i := 0; i < len(incs); {
+		j := i + 1
+		for j < len(incs) && key(incs[j]) == key(incs[i]) {
+			j++
+		}
+		run := incs[i:j]
+		rng.Shuffle(len(run), func(a, b int) { run[a], run[b] = run[b], run[a] })
+		i = j
+	}
 }
 
 // render shapes an incident as the profile's FortiSIEM version returns it.

@@ -8,9 +8,11 @@
 //
 // FortiSIEM filters timeFrom/timeTo on incidentLastSeen, so collection is
 // incremental on incidentLastSeen: every cycle asks for the incidents seen
-// since the checkpoint minus a 10-minute overlap, sorted by incidentLastSeen,
-// and the checkpoint keeps the highest incidentLastSeen delivered plus the
-// IDs delivered at exactly that millisecond. An incident first seen before
+// since the checkpoint minus a 10-minute overlap, and the checkpoint keeps the
+// highest incidentLastSeen delivered plus the IDs delivered at exactly that
+// millisecond. FortiSIEM's start/size paging is unstable, so windows are read
+// by partition rather than by paging (see partition.go): each query fits in
+// one page and the incidents come out sorted by incidentLastSeen. An incident first seen before
 // the lookback horizon is sent as statusOnly (the platform only refreshes the
 // status of an alert it already has). Every status_refresh_hours the whole
 // lookback window is read again, since an analyst can resolve an incident
@@ -46,11 +48,11 @@ const (
 	checkpointVersion = 1
 	checkpointMode    = "incidents"
 
-	// pageSize is the incidents asked per page: FortiSIEM caps size near 1000
-	// and may return size+1 items (inclusive end), so pages are advanced by
-	// pageSize and deduplicated by incidentId.
+	// pageSize is the incidents asked per query: FortiSIEM caps size near
+	// 1000 and may return size+1 items (inclusive end). A window whose total
+	// exceeds it is split (partition.go).
 	pageSize = 500
-	// maxPages bounds one pass whatever the server answers.
+	// maxPages bounds one paged read of a dense window (partition.go).
 	maxPages = 400
 
 	// overlap re-reads the end of the previous window, for incidents that
@@ -60,8 +62,7 @@ const (
 	defaultMaxAlerts    = 1000
 	defaultLookbackDays = 7
 
-	// hardLimit bounds a pass that cannot stop early: the status sweep, and a
-	// pass whose results are not sorted by incidentLastSeen.
+	// hardLimit bounds the status sweep.
 	hardLimit = config.MaxAlertsPerSyncLimit
 
 	// maxCheckpointSkew rejects checkpoints too far in the future (corrupt
@@ -174,9 +175,15 @@ type Collector struct {
 
 	// orderBy is orderByLastSeen unless the server rejected it.
 	orderBy string
-	// Paging limits (constants; fields so tests can shrink them).
-	pageSize int
-	maxPages int
+	// denseOrderBy pages dense windows: orderByIncidentID unless the server
+	// rejected it.
+	denseOrderBy string
+	// Query limits (constants; fields so tests can shrink them).
+	pageSize    int
+	maxPages    int
+	maxRequests int
+	// requests counts the incident queries of the current collection.
+	requests int
 
 	// pending and confirmed remember the incidents delivered in the overlap
 	// window (see Collect), so they are not posted again every cycle.
@@ -246,8 +253,10 @@ func newCollectorWith(s settings, httpClient *http.Client, syncCfg config.SyncCo
 		statusRefresh: time.Duration(max(syncCfg.StatusRefreshHours, 0)) * time.Hour,
 		now:           now,
 		orderBy:       orderByLastSeen,
+		denseOrderBy:  orderByIncidentID,
 		pageSize:      pageSize,
 		maxPages:      maxPages,
+		maxRequests:   defaultMaxRequests,
 	}, nil
 }
 
@@ -309,7 +318,8 @@ func (c *Collector) probe(ctx context.Context, span time.Duration) (*incidentPag
 // query runs one incident page. A server that rejects sorting by
 // incidentLastSeen (HTTP 400 from the incident endpoint) is asked again
 // sorted by incidentFirstSeen, which every version documents, and keeps that
-// sort from then on. A 400 from the OAuth token endpoint (FortiSIEM Cloud
+// sort from then on: the window partition does not depend on the server's
+// order (partition.go sorts each window itself). A 400 from the OAuth token endpoint (FortiSIEM Cloud
 // sometimes answers "Invalid input parameters" right after another token
 // was issued) is not about the sort and is returned as is.
 func (c *Collector) query(ctx context.Context, start, size int, from, to int64) (*incidentPage, error) {
@@ -317,7 +327,7 @@ func (c *Collector) query(ctx context.Context, start, size int, from, to int64) 
 	var apiErr *APIError
 	if err != nil && c.orderBy == orderByLastSeen && errors.As(err, &apiErr) &&
 		apiErr.StatusCode == http.StatusBadRequest && apiErr.Path == incidentPath {
-		log.Warn().Err(err).Msg("fortisiem: the server rejected orderBy incidentLastSeen; sorting by incidentFirstSeen (each cycle then reads its whole window)")
+		log.Warn().Err(err).Msg("fortisiem: the server rejected orderBy incidentLastSeen; sorting by incidentFirstSeen")
 		c.orderBy = orderByFirstSeen
 		return c.client.queryIncidents(ctx, newIncidentQuery(start, size, from, to, c.orderBy))
 	}
@@ -367,7 +377,6 @@ func parseCheckpoint(raw string, now time.Time) (checkpointState, bool) {
 // checkpointTracker computes the next checkpoint: the highest incidentLastSeen
 // processed and the IDs processed at exactly that timestamp.
 type checkpointTracker struct {
-	initial checkpointState
 	ts      int64
 	ids     map[string]struct{}
 	sweep   int64
@@ -378,7 +387,7 @@ type checkpointTracker struct {
 // window's lower bound when there is none (so a foreign checkpoint is
 // replaced even when nothing is found).
 func newCheckpointTracker(cp checkpointState, valid bool, lower int64) *checkpointTracker {
-	t := &checkpointTracker{initial: cp, ts: lower, ids: map[string]struct{}{}, changed: !valid}
+	t := &checkpointTracker{ts: lower, ids: map[string]struct{}{}, changed: !valid}
 	if valid {
 		t.ts, t.sweep = cp.TS, cp.Sweep
 		for _, id := range cp.IDs {
@@ -399,16 +408,6 @@ func (t *checkpointTracker) observe(ts int64, id string) {
 			t.ids[id] = struct{}{}
 			t.changed = true
 		}
-	}
-}
-
-// restore drops the progress observed in this cycle (the window could not
-// be read safely), keeping the sweep time.
-func (t *checkpointTracker) restore(valid bool, lower int64) {
-	sweep := t.sweep
-	*t = *newCheckpointTracker(t.initial, valid, lower)
-	if sweep != t.sweep {
-		t.sweep, t.changed = sweep, true
 	}
 }
 
@@ -443,7 +442,7 @@ type deliveryMemo struct {
 
 // --- collection -----------------------------------------------------------------
 
-// pass is one paged read of [from, to] (incidentLastSeen).
+// pass is one read of [from, to] (incidentLastSeen).
 type pass struct {
 	name  string
 	from  int64
@@ -473,7 +472,6 @@ type passResult struct {
 	counted   int
 	skipped   int
 	truncated bool
-	unsorted  bool
 }
 
 // insertable reports a template the platform inserts when it is new.
@@ -517,6 +515,7 @@ func (c *Collector) Collect(ctx context.Context, checkpoint string) (collector.B
 	to := nowMs
 	from = min(from, to)
 
+	c.beginScan()
 	batch := collector.Batch{
 		Checkpoint: checkpoint,
 		WindowFrom: time.UnixMilli(from).UTC(),
@@ -576,14 +575,7 @@ func (c *Collector) Collect(ctx context.Context, checkpoint string) (collector.B
 		return collector.Batch{}, err
 	}
 	if res.truncated {
-		if res.unsorted {
-			// Without the incidentLastSeen order, the incidents not read may be
-			// older than the ones read: the checkpoint cannot move.
-			log.Error().Int("limit", hardLimit).Msg("fortisiem: the window holds more incidents than one unsorted pass can read; the checkpoint does not advance (lower sync.lookback_days)")
-			tracker.restore(valid, from)
-		} else {
-			log.Info().Int("max_alerts", c.maxAlerts).Msg("fortisiem: max_alerts_per_sync reached; the rest is collected next cycle")
-		}
+		log.Info().Int("max_alerts", c.maxAlerts).Msg("fortisiem: max_alerts_per_sync reached; the rest is collected next cycle")
 	}
 
 	if c.statusRefresh > 0 {
@@ -633,6 +625,7 @@ func (c *Collector) Collect(ctx context.Context, checkpoint string) (collector.B
 		Int("alerts", len(batch.Templates)).
 		Int("status_only", statusOnly).
 		Int("false_positive", excluded).
+		Int("requests", c.requests).
 		Msg("fortisiem: collection complete")
 	return batch, nil
 }
@@ -661,86 +654,49 @@ func (c *Collector) mapOptions(window *Window) MapOptions {
 	}
 }
 
-// runPass pages through [p.from, p.to] sorted by incidentLastSeen ascending.
-//
-// Pages advance by pageSize (FortiSIEM may answer pageSize+1 items) and are
-// deduplicated by incidentId; the pass ends on an empty page, once start
-// reaches total, or after maxPages. Once p.limit incidents were accepted the
-// pass stops (truncated); the checkpoint then stops at the last incident
-// processed, which is safe only while the server sorts by incidentLastSeen:
-// a pass that finds the order broken (or a server that cannot sort by it)
-// reads up to hardLimit incidents instead.
+// runPass reads [p.from, p.to] by window partition (partition.go), which
+// delivers the incidents sorted by incidentLastSeen. Repeats (an incident
+// that moved to a later subwindow while the window was read) are
+// deduplicated by incidentId. Once p.limit incidents were accepted the pass
+// stops (truncated) without querying the rest of the window; the checkpoint
+// then stops at the last incident processed, which the order makes safe.
 func (c *Collector) runPass(ctx context.Context, batch *collector.Batch, p pass) (passResult, error) {
 	var res passResult
-	limit := p.limit
 	quota := p.insertQuota
 	seen := map[string]struct{}{}
-	prev := int64(-1)
-
-	for page, start := 0, 0; ; page, start = page+1, start+c.pageSize {
-		if page >= c.maxPages {
-			log.Warn().Str("pass", p.name).Int("pages", page).Msg("fortisiem: page limit reached; stopping this pass")
-			res.truncated = true
-			return res, nil
-		}
-		pg, err := c.query(ctx, start, c.pageSize, p.from, p.to)
-		if err != nil {
-			return res, fmt.Errorf("consultando incidentes (start=%d): %w", start, err)
-		}
-		if c.orderBy != orderByLastSeen && !res.unsorted {
-			res.unsorted = true
-			limit = max(limit, hardLimit)
-		}
-		if pg.Items == 0 {
-			return res, nil
-		}
-		if pg.Invalid > 0 {
-			log.Warn().Int("items", pg.Invalid).Msg("fortisiem: skipping data[] items that are not objects")
-			batch.Fetched += pg.Invalid
-		}
-		for _, inc := range pg.Data {
-			id := incidentID(inc["incidentId"])
-			if id == "" {
-				batch.Fetched++
-				log.Warn().Msg("fortisiem: skipping incident without incidentId")
-				continue
-			}
+	sink := &scanSink{
+		invalid: func(n int) {
+			log.Warn().Int("items", n).Msg("fortisiem: skipping data[] items that are not objects or have no incidentId")
+			batch.Fetched += n
+		},
+		incident: func(it scannedIncident) bool {
+			id, lastSeen, hasLastSeen := it.id, it.lastSeen, it.hasLastSeen
 			if _, dup := seen[id]; dup {
-				continue // repeated at a page boundary
+				return true
 			}
 			seen[id] = struct{}{}
-
-			lastSeen, hasLastSeen := epochMs(inc["incidentLastSeen"])
-			if hasLastSeen && c.orderBy == orderByLastSeen {
-				if lastSeen < prev && !res.unsorted {
-					log.Warn().Int64("incidentLastSeen", lastSeen).Int64("previous", prev).Msg("fortisiem: incidents are not sorted by incidentLastSeen; reading the whole window")
-					res.unsorted = true
-					limit = max(limit, hardLimit)
-				}
-				prev = max(prev, lastSeen)
-			}
-			if res.counted >= limit {
+			if res.counted >= p.limit {
 				res.truncated = true
-				return res, nil
+				return false
 			}
 			if _, done := p.exclude[id]; done {
-				continue
+				return true
 			}
 			if p.observe != nil && hasLastSeen {
-				p.observe(min(lastSeen, p.to), id)
+				p.observe(it.key, id)
 			}
 			if p.skip != nil && p.skip(id, lastSeen, hasLastSeen) {
 				res.skipped++
-				continue
+				return true
 			}
 
 			batch.Fetched++
-			template, err := MapIncident(inc, p.opts)
+			template, err := MapIncident(it.raw, p.opts)
 			if err != nil {
 				if !errors.Is(err, errFiltered) {
 					log.Warn().Str("incident", id).Err(err).Msg("fortisiem: skipping incident")
 				}
-				continue
+				return true
 			}
 			res.accepted++
 			if p.uncounted == nil || !p.uncounted(lastSeen, hasLastSeen) {
@@ -757,9 +713,9 @@ func (c *Collector) runPass(ctx context.Context, batch *collector.Batch, p pass)
 			if p.emitted != nil {
 				p.emitted(id, lastSeen, hasLastSeen)
 			}
-		}
-		if pg.HasTotal && int64(start+c.pageSize) >= pg.Total {
-			return res, nil
-		}
+			return true
+		},
 	}
+	_, err := c.scanWindow(ctx, p.from, p.to, sink)
+	return res, err
 }

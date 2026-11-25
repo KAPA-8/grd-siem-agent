@@ -124,28 +124,33 @@ func TestCollect_IncrementalWithOverlap(t *testing.T) {
 	})
 }
 
-func TestCollect_PaginationWithInclusiveEnd(t *testing.T) {
+// A window larger than a page is split into subwindows that each fit in one
+// start=0 page (DESIGN §10): with size+1 items per page, as FortiSIEM Cloud
+// answers, every incident is delivered once, in incidentLastSeen order.
+func TestCollect_PartitionWithInclusiveEnd(t *testing.T) {
 	bothProfiles(t, func(t *testing.T, profile mockProfile) {
 		env := newEnv(t, profile, func(_ *settings, s *config.SyncConfig) { s.MaxAlertsPerSync = 5000 })
 		env.coll.pageSize = 100
-		env.mock.inclusiveEnd = true // size+1 items per page, as FortiSIEM Cloud
+		env.mock.inclusiveEnd = true
 		var want []int64
 		for i := int64(0); i < 1203; i++ {
 			env.mock.add(securityIncident(10000+i, testBase.Add(-time.Duration(1203-i)*time.Minute)))
 			want = append(want, 10000+i)
 		}
 		ids, b := env.collect(t, "")
-		sameIDs(t, "all pages", ids, idsOf(want...))
-		if len(ids) != 1203 || b.fetched != 1203 {
-			t.Errorf("templates = %d, fetched = %d, want 1203 each (no duplicates)", len(ids), b.fetched)
+		if strings.Join(ids, ",") != strings.Join(idsOf(want...), ",") {
+			t.Errorf("templates are not every incident once in incidentLastSeen order (%d templates)", len(ids))
+		}
+		if b.fetched != 1203 {
+			t.Errorf("fetched = %d, want 1203", b.fetched)
 		}
 		reqs := env.mock.recorded(incidentPath)
-		if len(reqs) != 13 {
-			t.Fatalf("pages = %d, want 13", len(reqs))
+		if len(reqs) > 60 {
+			t.Errorf("queries = %d, want a few dozen", len(reqs))
 		}
 		for i, r := range reqs {
-			if r.Query.Start != i*100 || r.Query.Size != 100 {
-				t.Errorf("page %d: start=%d size=%d, want start += size", i, r.Query.Start, r.Query.Size)
+			if r.Query.Start != 0 || r.Query.Size != 100 || r.Query.OrderBy != orderByLastSeen {
+				t.Errorf("query %d: start=%d size=%d orderBy=%s, want one page per window", i, r.Query.Start, r.Query.Size, r.Query.OrderBy)
 			}
 		}
 	})
@@ -403,18 +408,37 @@ func TestClient_RetriesWithRetryAfter(t *testing.T) {
 	}
 }
 
+// The partition does not depend on the server's order: sorted by
+// incidentFirstSeen, max_alerts_per_sync still truncates in incidentLastSeen
+// order and the next cycle resumes from the checkpoint.
 func TestCollect_FallsBackWhenOrderByLastSeenIsRejected(t *testing.T) {
-	env := newEnv(t, profile74, func(_ *settings, s *config.SyncConfig) { s.MaxAlertsPerSync = 2 })
-	env.mock.rejectOrderByLastSeen = true
-	for i := int64(1); i <= 4; i++ {
-		env.mock.add(securityIncident(i, testBase.Add(-time.Duration(i)*time.Hour)))
-	}
-	ids, _ := env.collect(t, "")
-	// Unsorted on lastSeen: the whole window is read whatever max_alerts_per_sync says.
-	sameIDs(t, "fallback", ids, idsOf(1, 2, 3, 4))
-	if env.coll.orderBy != orderByFirstSeen {
-		t.Errorf("orderBy = %s", env.coll.orderBy)
-	}
+	bothProfiles(t, func(t *testing.T, profile mockProfile) {
+		env := newEnv(t, profile, func(_ *settings, s *config.SyncConfig) { s.MaxAlertsPerSync = 2 })
+		env.mock.rejectOrderByLastSeen = true
+		for i := int64(1); i <= 4; i++ {
+			inc := securityIncident(i, testBase.Add(-time.Duration(10*i)*time.Hour))
+			inc.LastSeen = ms(testBase.Add(-time.Duration(i) * time.Hour)) // firstSeen order != lastSeen order
+			env.mock.add(inc)
+		}
+		ids, b := env.collect(t, "")
+		if strings.Join(ids, ",") != "4,3" {
+			t.Errorf("cycle 1 = %v, want the two oldest by incidentLastSeen", ids)
+		}
+		if env.coll.orderBy != orderByFirstSeen {
+			t.Errorf("orderBy = %s", env.coll.orderBy)
+		}
+		env.clock.Advance(time.Minute)
+		ids, _ = env.collect(t, b.checkpoint)
+		if strings.Join(ids, ",") != "2,1" {
+			t.Errorf("cycle 2 = %v, want the rest", ids)
+		}
+		reqs := env.mock.recorded(incidentPath)
+		for _, r := range reqs[1:] {
+			if r.Query.OrderBy != orderByFirstSeen {
+				t.Errorf("query sorted by %s after the fallback", r.Query.OrderBy)
+			}
+		}
+	})
 }
 
 func TestCollect_HTMLAnswerIsAClearError(t *testing.T) {
@@ -435,6 +459,9 @@ func TestTestConnection(t *testing.T) {
 	}
 	if !strings.Contains(msg, "conexión correcta") || !strings.Contains(msg, "24 h: 1") {
 		t.Errorf("message = %q", msg)
+	}
+	if n := len(env.mock.recorded(incidentPath)); n != 1 {
+		t.Errorf("test-siem ran %d incident queries, want 1", n)
 	}
 }
 
