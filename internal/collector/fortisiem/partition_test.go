@@ -3,6 +3,7 @@ package fortisiem
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -128,8 +129,8 @@ func TestPartition_DenseSecondIsReadUntilStable(t *testing.T) {
 		for _, r := range env.mock.recorded(incidentPath) {
 			if r.Query.Start > 0 {
 				paged++
-				if r.Query.OrderBy != orderByIncidentID || r.Query.TimeTo-r.Query.TimeFrom >= minSplitWindow {
-					t.Errorf("paged query %+v, want orderBy incidentId within one short window", r.Query)
+				if r.Query.OrderBy != orderByIncidentID || wholeSeconds(r.Query.TimeFrom, r.Query.TimeTo) > 1 {
+					t.Errorf("paged query %+v, want orderBy incidentId within one second", r.Query)
 				}
 			}
 		}
@@ -188,13 +189,69 @@ func TestPartition_WithoutTotal(t *testing.T) {
 	})
 }
 
+// scanIDs runs scanWindow over [from, to] and returns the incidentIds it
+// delivered, failing the test on error.
+func scanIDs(t *testing.T, env *testEnv, from, to int64) []string {
+	t.Helper()
+	var got []string
+	env.coll.beginScan()
+	if _, err := env.coll.scanWindow(context.Background(), from, to, &scanSink{
+		incident: func(s scannedIncident) bool { got = append(got, s.id); return true },
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// Two adjacent seconds that hold more than a page together, but not alone,
+// are split at the whole second between them: no paged read. A split in the
+// middle of a second would leave both seconds in one subwindow.
+func TestPartition_SplitsAtWholeSeconds(t *testing.T) {
+	bothProfiles(t, func(t *testing.T, profile mockProfile) {
+		for _, c := range []struct {
+			name     string
+			from, to int64 // offsets from base, ms
+			want     [][2]int64
+		}{
+			{"three seconds", 0, 2999, [][2]int64{{0, 2999}, {0, 999}, {1000, 2999}}},
+			{"exactly two seconds", 0, 1999, [][2]int64{{0, 1999}, {0, 999}, {1000, 1999}}},
+			{"not starting on a second", -999, 1500, [][2]int64{{-999, 1500}, {-999, 999}, {1000, 1500}}},
+		} {
+			t.Run(c.name, func(t *testing.T) {
+				env := newEnv(t, profile, nil)
+				env.coll.pageSize = 100
+				env.mock.inclusiveEnd = true
+				env.mock.setUnstable(3, 3)
+				base := testBase.Add(-time.Hour)
+				var want []int64
+				for i := range int64(120) {
+					env.mock.add(securityIncident(5000+i, base.Add(time.Duration(i%2)*time.Second)))
+					want = append(want, 5000+i)
+				}
+				b := ms(base)
+				checkOnce(t, c.name, scanIDs(t, env, b+c.from, b+c.to), want)
+				var windows [][2]int64
+				for _, r := range env.mock.recorded(incidentPath) {
+					if r.Query.Start != 0 || r.Query.OrderBy == orderByIncidentID {
+						t.Errorf("paged query %+v: two seconds of 60 incidents each fit in a page apiece", r.Query)
+					}
+					windows = append(windows, [2]int64{r.Query.TimeFrom - b, r.Query.TimeTo - b})
+				}
+				if fmt.Sprint(windows) != fmt.Sprint(c.want) {
+					t.Errorf("windows = %v, want %v", windows, c.want)
+				}
+			})
+		}
+	})
+}
+
 // A dense window whose total never matches (the server counts more than it
 // returns) stops after two reads in a row add nothing: three reads.
 func TestPartition_DenseStopsAfterTwoQuietReads(t *testing.T) {
 	env := newEnv(t, profileCloud, func(_ *settings, s *config.SyncConfig) { s.MaxAlertsPerSync = 10000 })
 	env.coll.pageSize = 100
 	env.mock.totalAdjust = func(q incidentQuery, total int) int {
-		if q.TimeTo-q.TimeFrom < minSplitWindow && total > 100 {
+		if wholeSeconds(q.TimeFrom, q.TimeTo) < 2 && total > 100 {
 			return total + 50
 		}
 		return total

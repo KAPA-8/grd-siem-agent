@@ -20,12 +20,14 @@ import (
 // incidents and skips others (1-3 % measured on FortiSIEM Cloud, whatever
 // the orderBy). A query that fits in ONE page is not affected. So a window is
 // read with a single start=0 page when its total fits in pageSize; otherwise
-// it is split into contiguous, non-overlapping subwindows of equal duration
-// that are read in ascending order (recursively). Since incidentLastSeen only
+// it is split into contiguous, non-overlapping subwindows with the same
+// number of whole seconds, cut at whole seconds (timestamps have second
+// resolution: a cut within a second would leave two seconds in one
+// subwindow), that are read in ascending order (recursively). Since incidentLastSeen only
 // grows, an incident that moves while the window is being read lands in a
 // later subwindow not read yet: it is never lost, and the repeats are
-// deduplicated by incidentId. Only a window shorter than minSplitWindow that
-// still holds more than pageSize incidents (many incidents last seen in the
+// deduplicated by incidentId. Only a window that holds a single whole second
+// and still more than pageSize incidents (many incidents last seen in the
 // same second) is paged, by incidentId, and read again until the union holds
 // total incidents or two reads in a row add none (at most four reads).
 //
@@ -36,12 +38,9 @@ import (
 const (
 	// partitionFill sizes the subwindows to hold ~70 % of a page on average.
 	partitionFill = 0.7
-	// minSplitWindow is the shortest window that is still split. FortiSIEM
-	// timestamps have second resolution, so shorter windows cannot be split
-	// usefully.
-	minSplitWindow = 2000 // ms
-	// minSubwindow is the shortest subwindow a split produces.
-	minSubwindow = 1000 // ms
+	// secondMs is the resolution of FortiSIEM timestamps: windows are split
+	// at whole seconds, and a window with a single whole second is not split.
+	secondMs = 1000
 	// orderByIncidentID sorts the paged read of a dense window.
 	orderByIncidentID = "incidentId"
 	// maxDensePasses bounds the reads of a dense window.
@@ -97,7 +96,8 @@ func (c *Collector) scanWindow(ctx context.Context, from, to int64, sink *scanSi
 	if complete {
 		return deliver(pg.Data, pg.Invalid, from, to, sink), nil
 	}
-	if to-from < minSplitWindow {
+	seconds := wholeSeconds(from, to)
+	if seconds < 2 {
 		return c.scanDense(ctx, from, to, sink)
 	}
 	// Without total a full page means "maybe more": split as if it held four
@@ -112,10 +112,19 @@ func (c *Collector) scanWindow(ctx context.Context, from, to int64, sink *scanSi
 		capacity = pg.Items
 	}
 	k := int64(math.Ceil(float64(total) / (partitionFill * float64(capacity))))
-	span := to - from + 1
-	k = max(min(k, span/minSubwindow), 2)
+	// Cut at whole seconds, at least one per subwindow: every subwindow holds
+	// fewer seconds than the window, so the recursion ends in single seconds.
+	k = max(min(k, seconds), 2)
+	first := ceilDiv(from, secondMs)
+	boundary := func(i int64) int64 { return (first + seconds*i/k) * secondMs }
 	for i := range k {
-		a, b := from+span*i/k, from+span*(i+1)/k-1
+		a, b := from, to
+		if i > 0 {
+			a = boundary(i)
+		}
+		if i < k-1 {
+			b = boundary(i+1) - 1
+		}
 		stopped, err := c.scanWindow(ctx, a, b, sink)
 		if err != nil || stopped {
 			return stopped, err
@@ -123,6 +132,25 @@ func (c *Collector) scanWindow(ctx context.Context, from, to int64, sink *scanSi
 	}
 	return false, nil
 }
+
+// wholeSeconds counts the whole seconds (the possible incidentLastSeen
+// values) within [from, to].
+func wholeSeconds(from, to int64) int64 {
+	if from > to {
+		return 0
+	}
+	return floorDiv(to, secondMs) - ceilDiv(from, secondMs) + 1
+}
+
+func floorDiv(a, b int64) int64 {
+	q := a / b
+	if a%b != 0 && (a < 0) != (b < 0) {
+		q--
+	}
+	return q
+}
+
+func ceilDiv(a, b int64) int64 { return -floorDiv(-a, b) }
 
 // pageIDs counts the distinct incidentIds of a page and its items without one.
 func pageIDs(data []map[string]any) (distinct, invalid int) {
@@ -138,7 +166,7 @@ func pageIDs(data []map[string]any) (distinct, invalid int) {
 	return len(ids), invalid
 }
 
-// scanDense reads a window shorter than minSplitWindow that holds more than
+// scanDense reads a window with a single whole second that holds more than
 // a page: it pages it by incidentId and reads it again, joining the reads,
 // until the union holds total incidentIds or two reads in a row add none
 // (at most maxDensePasses reads).
