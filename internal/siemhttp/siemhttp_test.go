@@ -1,6 +1,8 @@
 package siemhttp
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"net/http"
@@ -115,5 +117,26 @@ func TestNewClient_ProxyAndTLSSettings(t *testing.T) {
 func TestIsCertificateError_Other(t *testing.T) {
 	if IsCertificateError(nil) || IsCertificateError(errors.New("connection refused")) {
 		t.Error("non-certificate errors must return false")
+	}
+}
+
+func TestCertificateFingerprint(t *testing.T) {
+	server := newTLSServer(t)
+	client, err := NewClient(Options{Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = get(t, client, server.URL)
+	if !IsCertificateError(err) {
+		t.Fatalf("err = %v, want a certificate error", err)
+	}
+	got := CertificateFingerprint(err)
+	sum := sha256.Sum256(server.Certificate().Raw)
+	want := strings.ToUpper(hex.EncodeToString(sum[:]))
+	if strings.ReplaceAll(got, ":", "") != want || strings.Count(got, ":") != 31 {
+		t.Errorf("fingerprint = %q, want %s as colon-separated pairs", got, want)
+	}
+	if CertificateFingerprint(errors.New("other")) != "" || CertificateFingerprint(nil) != "" {
+		t.Error("errors without a certificate must give an empty fingerprint")
 	}
 }

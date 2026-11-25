@@ -10,6 +10,7 @@
     "destinationIp": "10.0.0.5",
     "assetName": "mail-gw-01",
     "tactic": "TA0001",
+    "sourceStatus": "new",
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.28-000001",
@@ -44,6 +45,7 @@
     "destinationIp": "10.0.0.20",
     "assetName": "dc-01",
     "tactic": "TA0006",
+    "sourceStatus": "in progress",
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.28-000001",
@@ -73,6 +75,7 @@
     "sourceIp": "10.1.1.4",
     "assetName": "ws-042",
     "tactic": "XTA0006",
+    "sourceStatus": "new",
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantB-2026.10.27-000002",
@@ -103,6 +106,7 @@
     "destinationIp": "192.0.2.44",
     "assetName": "fileserver-02",
     "tactic": "TA0010",
+    "sourceStatus": "closed",
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.26-000003",
@@ -127,6 +131,7 @@
     "description": "Uncommon Process Anomaly",
     "alertDate": "2026-10-25",
     "severity": "info",
+    "sourceStatus": "new",
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.25-000004",
@@ -145,6 +150,8 @@
     "severity": "critical",
     "sourceIp": "10.0.0.9",
     "tactic": "TA0007",
+    "sourceStatus": "ignored",
+    "fairExcluded": true,
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.29-000005",
@@ -170,6 +177,7 @@
     "alertDate": "2026-10-29",
     "severity": "high",
     "tactic": "TA0040",
+    "sourceStatus": "new",
     "rawData": {
       "source": "stellar_cyber",
       "index": "stellar-index-v1-ser-org1-tenantA-2026.10.29-000005",

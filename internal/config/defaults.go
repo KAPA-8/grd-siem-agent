@@ -13,9 +13,11 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("sync.lookback_days", 7)
 	v.SetDefault("sync.max_alerts_per_sync", 1000)
 	v.SetDefault("sync.filters.min_severity", "low")
+	v.SetDefault("sync.status_refresh_hours", 6)
 
 	// SIEM credentials
 	v.SetDefault("siem.credentials.validate_ssl", true)
+	v.SetDefault("siem.credentials.security_only", true)
 
 	// Buffer
 	v.SetDefault("buffer.enabled", true)

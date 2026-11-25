@@ -594,19 +594,16 @@ func (c *Collector) collectCases(ctx context.Context, batch *collector.Batch, cp
 			if !c.passesFilters(doc.Source) {
 				continue
 			}
-			c.appendMapped(batch, doc, extra)
+			c.appendCaseAlert(batch, doc, extra, cs.Status)
 		}
 		tracker.observe(modifiedAt, cs.ID)
 	}
 	return nil
 }
 
-// passesFilters applies to case alerts the filters the alerts mode sends to
-// the server: NOT event_status:"Ignored" and event_score:>=min.
+// passesFilters applies to case alerts the filter the alerts mode sends to
+// the server: event_score:>=min. Ignored alerts pass (marked fairExcluded).
 func (c *Collector) passesFilters(source map[string]any) bool {
-	if strings.EqualFold(str(source["event_status"]), ignoredStatus) {
-		return false
-	}
 	if c.minScore > 0 {
 		score, ok := numeric(source["event_score"])
 		if !ok || score < float64(c.minScore) {
@@ -782,5 +779,18 @@ func (c *Collector) appendMapped(batch *collector.Batch, hit Hit, extra map[stri
 		log.Warn().Str("id", hit.ID).Err(err).Msg("stellar cyber: skipping alert")
 		return
 	}
+	batch.Templates = append(batch.Templates, template)
+}
+
+// appendCaseAlert maps an alert of a case: its source status is the case's
+// status (DESIGN 2026-11-24 §0.5), and it is fairExcluded when the alert is
+// Ignored or the case is not one of caseStatuses (Cancelled…); see sourceState.
+func (c *Collector) appendCaseAlert(batch *collector.Batch, hit Hit, extra map[string]any, caseStatus string) {
+	template, _, err := MapHit(hit, extra)
+	if err != nil {
+		log.Warn().Str("id", hit.ID).Err(err).Msg("stellar cyber: skipping alert")
+		return
+	}
+	template.SourceStatus, template.FairExcluded = sourceState(hit.Source, caseStatus)
 	batch.Templates = append(batch.Templates, template)
 }

@@ -33,6 +33,13 @@ type Collector interface {
 	Close() error
 }
 
+// ConnectionTester is implemented by collectors that can run and describe a
+// connection test (authentication plus a minimal query) for
+// "grd-siem-agent test-siem", which never contacts the platform.
+type ConnectionTester interface {
+	TestConnection(ctx context.Context) (string, error)
+}
+
 // Batch is the result of one collection cycle.
 type Batch struct {
 	// Templates are the alerts to deliver, in the platform format.

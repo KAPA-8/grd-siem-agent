@@ -30,7 +30,13 @@ type SyncResponse struct {
 	AlertsDuplicate int    `json:"alerts_duplicate"` // already stored for this connection (same externalId)
 	AlertsErrors    int    `json:"alerts_errors"`    // transient failures: the same window is sent again
 	AlertsRejected  int    `json:"alerts_rejected"`  // permanently invalid alerts: re-sending them changes nothing
-	LimitReached    bool   `json:"limit_reached"`
-	Message         string `json:"message,omitempty"`
-	Error           string `json:"error,omitempty"`
+	// AlertsExcluded counts new alerts that were not stored: discarded at the
+	// source (fairExcluded) or statusOnly. Older platforms omit it.
+	AlertsExcluded int `json:"alerts_excluded,omitempty"`
+	// AlertsStatusUpdated counts stored alerts whose source status changed.
+	// Older platforms omit it.
+	AlertsStatusUpdated int    `json:"alerts_status_updated,omitempty"`
+	LimitReached        bool   `json:"limit_reached"`
+	Message             string `json:"message,omitempty"`
+	Error               string `json:"error,omitempty"`
 }

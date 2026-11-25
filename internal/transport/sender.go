@@ -148,6 +148,8 @@ func (s *Sender) SendSync(ctx context.Context, payload models.SyncPayload) (*mod
 		Int("alerts_skipped", result.AlertsSkipped).
 		Int("alerts_errors", result.AlertsErrors).
 		Int("alerts_rejected", result.AlertsRejected).
+		Int("alerts_excluded", result.AlertsExcluded).
+		Int("alerts_status_updated", result.AlertsStatusUpdated).
 		Bool("limit_reached", result.LimitReached).
 		Msg("sync response received")
 

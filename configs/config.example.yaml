@@ -4,8 +4,9 @@
 # SETUP FLOW:
 # 1. Register the agent and create the SIEM connection (mode "agent") in the GRD Dashboard
 # 2. Copy the agent_id, agent_token and connection_id into this file
-# 3. Fill in the SIEM section for your SIEM type (QRadar or Stellar Cyber, below)
+# 3. Fill in the SIEM section for your SIEM type (QRadar, Stellar Cyber or FortiSIEM, below)
 # 4. Run: grd-siem-agent validate --config config.yaml
+#    and grd-siem-agent test-siem --config config.yaml (tests the SIEM only; sends nothing to GRD)
 # 5. Run: grd-siem-agent run --config config.yaml
 #
 # Every key can be overridden with an environment variable: GRD_ + the key path in
@@ -25,7 +26,7 @@ platform:
 
 # SIEM connection: IBM QRadar
 siem:
-  type: "qradar"                                   # qradar | stellar_cyber
+  type: "qradar"                                   # qradar | stellar_cyber | fortisiem
   connection_id: ""                                # Platform connection UUID (from dashboard)
   api_url: "https://192.168.1.50"                  # QRadar console URL (internal network)
   credentials:
@@ -54,11 +55,37 @@ siem:
 #     validate_ssl: true                           # On-prem only; SaaS certificates are always verified
 #     ca_cert_file: ""                             # On-prem: PEM bundle of the Data Processor's CA
 
+# SIEM connection: FortiSIEM (replace the qradar block above with this one)
+#
+# siem:
+#   type: "fortisiem"
+#   connection_id: ""                              # Platform connection UUID (from dashboard)
+#   api_url: "https://supervisor.example.com"      # On-prem: https://<supervisor-host> (port 443)
+#                                                  # Cloud: https://ID-fsm.REGION.fortisoc.forticloud.com (from FortiCloud)
+#   deployment: "onprem"                           # onprem (Supervisor) | cloud (FortiSIEM Cloud, the default)
+#   credentials:
+#     auth_mode: "basic"                           # basic: organization/user + password (every version)
+#                                                  # oauth: client credentials (FortiSIEM 7.5+ and Cloud only)
+#     organization: "super"                        # basic: Enterprise -> super; Service Provider -> the
+#                                                  #   organization name, or super + tenant_id
+#     username: "apiuser"                          # basic: the FortiSIEM user, without the organization prefix
+#     password: ''                                 # basic: keep the 'single quotes' (double any ' inside),
+#                                                  #   or set GRD_SIEM_PASSWORD
+#     client_id: ""                                # oauth only
+#     client_secret: ""                            # oauth only (or GRD_SIEM_CLIENT_SECRET)
+#     tenant_id: ""                                # Optional: only this organization (name or phCustId)
+#     security_only: true                          # Only incidents of the Security category
+#     validate_ssl: true                           # On-prem: false only for a self-signed certificate
+#                                                  #   without ca_cert_file; Cloud is always verified
+#     ca_cert_file: ""                             # On-prem: PEM certificate of the Supervisor (self-signed)
+
 # Sync settings
 sync:
   interval_minutes: 15       # How often to poll the SIEM
   lookback_days: 7           # How far back to look on first run (no checkpoint)
   max_alerts_per_sync: 1000  # Maximum alerts per collection cycle (1..10000, sent in batches of 500)
+  status_refresh_hours: 6    # FortiSIEM: every N hours re-read the lookback window so status changes
+                             # (an incident resolved as a false positive) reach GRD (0 = off)
   filters:
     min_severity: "medium"   # Minimum severity: info, low, medium, high, critical
 
