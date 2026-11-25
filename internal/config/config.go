@@ -67,8 +67,9 @@ type SyncConfig struct {
 	MaxAlertsPerSync int `mapstructure:"max_alerts_per_sync"`
 	// StatusRefreshHours spaces out the status sweeps of collectors whose
 	// source changes an alert's status without reporting it as new
-	// (fortisiem): every N hours the whole lookback window is read again and
-	// sent as status-only. 0 disables it. Default 6.
+	// (fortisiem): every N hours the whole lookback window is read again to
+	// refresh statuses (what it could insert stays within max_alerts_per_sync;
+	// the rest is sent as status-only). 0 disables it. Default 6.
 	StatusRefreshHours int     `mapstructure:"status_refresh_hours"`
 	Filters            Filters `mapstructure:"filters"`
 }

@@ -307,12 +307,16 @@ func (c *Collector) probe(ctx context.Context, span time.Duration) (*incidentPag
 }
 
 // query runs one incident page. A server that rejects sorting by
-// incidentLastSeen (HTTP 400) is asked again sorted by incidentFirstSeen,
-// which every version documents, and keeps that sort from then on.
+// incidentLastSeen (HTTP 400 from the incident endpoint) is asked again
+// sorted by incidentFirstSeen, which every version documents, and keeps that
+// sort from then on. A 400 from the OAuth token endpoint (FortiSIEM Cloud
+// sometimes answers "Invalid input parameters" right after another token
+// was issued) is not about the sort and is returned as is.
 func (c *Collector) query(ctx context.Context, start, size int, from, to int64) (*incidentPage, error) {
 	page, err := c.client.queryIncidents(ctx, newIncidentQuery(start, size, from, to, c.orderBy))
 	var apiErr *APIError
-	if err != nil && c.orderBy == orderByLastSeen && errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusBadRequest {
+	if err != nil && c.orderBy == orderByLastSeen && errors.As(err, &apiErr) &&
+		apiErr.StatusCode == http.StatusBadRequest && apiErr.Path == incidentPath {
 		log.Warn().Err(err).Msg("fortisiem: the server rejected orderBy incidentLastSeen; sorting by incidentFirstSeen (each cycle then reads its whole window)")
 		c.orderBy = orderByFirstSeen
 		return c.client.queryIncidents(ctx, newIncidentQuery(start, size, from, to, c.orderBy))

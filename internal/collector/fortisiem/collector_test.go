@@ -567,3 +567,25 @@ func TestCollect_StatusSweepRespectsMaxAlerts(t *testing.T) {
 		t.Errorf("statusOnly = %v, want the incremental 3 and 4 insertable and the sweep only status", b.statusOnly)
 	}
 }
+
+// A 400 from the token endpoint is a credential (or transient) error, never
+// a reason to stop sorting by incidentLastSeen.
+func TestCollect_Token400KeepsTheLastSeenSort(t *testing.T) {
+	env := newEnv(t, profileCloud, nil)
+	env.mock.add(securityIncident(1, testBase.Add(-time.Hour)))
+	env.mock.tokenPostStatus = http.StatusBadRequest
+	if _, err := env.coll.Collect(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "HTTP 400") {
+		t.Fatalf("err = %v", err)
+	}
+	if env.coll.orderBy != orderByLastSeen {
+		t.Fatalf("orderBy = %s after a token 400", env.coll.orderBy)
+	}
+	env.mock.tokenPostStatus = 0
+	ids, _ := env.collect(t, "")
+	sameIDs(t, "after the token recovers", ids, idsOf(1))
+	for _, r := range env.mock.recorded(incidentPath) {
+		if r.Query.OrderBy != orderByLastSeen {
+			t.Errorf("query sorted by %s", r.Query.OrderBy)
+		}
+	}
+}
