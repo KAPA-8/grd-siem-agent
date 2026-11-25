@@ -322,6 +322,27 @@ func TestOAuth_AgainstFortiSIEM74(t *testing.T) {
 	}
 }
 
+func TestOAuth_TransientInvalidInputIsRetried(t *testing.T) {
+	env := newEnv(t, profileCloud, nil)
+	env.mock.tokenTransient400 = 1
+	if err := env.coll.HealthCheck(context.Background()); err != nil {
+		t.Fatalf("a transient 400 must be retried: %v", err)
+	}
+	if n := len(env.mock.recorded(tokenPath)); n != 2 {
+		t.Errorf("token requests = %d, want 2", n)
+	}
+
+	persistent := newEnv(t, profileCloud, nil)
+	persistent.mock.tokenTransient400 = 10
+	err := persistent.coll.HealthCheck(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "client_secret") {
+		t.Errorf("err = %v", err)
+	}
+	if n := len(persistent.mock.recorded(tokenPath)); n != 1+tokenTransientRetries {
+		t.Errorf("token requests = %d, want %d", n, 1+tokenTransientRetries)
+	}
+}
+
 func TestOAuth_InvalidClient(t *testing.T) {
 	env := newEnv(t, profileCloud, func(s *settings, _ *config.SyncConfig) { s.clientSecret = "wrong-secret-value" })
 	err := env.coll.Init(context.Background())

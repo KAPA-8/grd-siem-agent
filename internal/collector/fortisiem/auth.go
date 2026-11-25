@@ -1,10 +1,12 @@
 package fortisiem
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -143,17 +145,37 @@ func (t *oauthTokenSource) form() url.Values {
 }
 
 func (t *oauthTokenSource) exchangeLocked(ctx context.Context) (string, error) {
-	resp, err := t.client.roundTrip(ctx, func() (*http.Request, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.client.baseURL+tokenPath, strings.NewReader(t.form().Encode()))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("Accept", "application/json")
-		return req, nil
-	})
+	post := func() (*http.Response, error) {
+		return t.client.roundTrip(ctx, func() (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, http.MethodPost, t.client.baseURL+tokenPath, strings.NewReader(t.form().Encode()))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("Accept", "application/json")
+			return req, nil
+		})
+	}
+	resp, err := post()
 	if err != nil {
 		return "", err
+	}
+	// FortiSIEM Cloud sometimes answers 400 "Invalid input parameters" to a valid request
+	// right after issuing another token (seen on a real tenant): retry briefly.
+	for retry := 0; retry < tokenTransientRetries; retry++ {
+		var transient bool
+		resp, transient = peekTransientTokenRejection(resp)
+		if !transient {
+			break
+		}
+		drainAndClose(resp.Body)
+		log.Warn().Int("attempt", retry+1).Msg("fortisiem: transient 400 from the OAuth token endpoint; retrying")
+		if err := t.client.sleep(ctx, tokenTransientDelay*time.Duration(retry+1)); err != nil {
+			return "", err
+		}
+		if resp, err = post(); err != nil {
+			return "", err
+		}
 	}
 	method := http.MethodPost
 	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
@@ -209,6 +231,24 @@ func (t *oauthTokenSource) exchangeLocked(ctx context.Context) (string, error) {
 	t.refreshAt = t.now().Add(ttl - margin)
 	log.Debug().Dur("expires_in", ttl).Msg("fortisiem: OAuth token obtained")
 	return "Bearer " + t.token, nil
+}
+
+// Transient 400 "Invalid input parameters" retries on the OAuth token endpoint.
+const (
+	tokenTransientRetries = 2
+	tokenTransientDelay   = 1500 * time.Millisecond
+)
+
+// peekTransientTokenRejection reports whether resp is the transient 400 "Invalid input
+// parameters"; the body stays readable for the caller.
+func peekTransientTokenRejection(resp *http.Response) (*http.Response, bool) {
+	if resp.StatusCode != http.StatusBadRequest {
+		return resp, false
+	}
+	buf, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	_ = resp.Body.Close()
+	resp.Body = io.NopCloser(bytes.NewReader(buf))
+	return resp, strings.Contains(strings.ToLower(string(buf)), "invalid input parameters")
 }
 
 // tokenHint explains a refused token request.

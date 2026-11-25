@@ -105,6 +105,9 @@ type mockFortiSIEM struct {
 	// tokenPostStatus, when set, is the answer to POST on the token endpoint
 	// (405 to exercise the GET fallback).
 	tokenPostStatus int
+	// tokenTransient400 answers the next N token POSTs with the transient
+	// 400 "Invalid input parameters" seen on FortiSIEM Cloud.
+	tokenTransient400 int
 	// tokenGetJSON makes GET on the token endpoint answer a token.
 	tokenGetJSON bool
 	// rejectOrderByLastSeen answers 400 to orderBy incidentLastSeen.
@@ -260,6 +263,18 @@ func (m *mockFortiSIEM) handleToken(w http.ResponseWriter, r *http.Request) {
 	var values map[string][]string
 	switch r.Method {
 	case http.MethodPost:
+		m.mu.Lock()
+		transient := m.tokenTransient400 > 0
+		if transient {
+			m.tokenTransient400--
+		}
+		m.mu.Unlock()
+		if transient {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("Invalid input parameters"))
+			return
+		}
 		if postStatus != 0 {
 			writeJSON(w, postStatus, nil)
 			return
