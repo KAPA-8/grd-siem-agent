@@ -500,3 +500,70 @@ func jsonInt(n int64) string {
 	data, _ := json.Marshal(n)
 	return string(data)
 }
+
+// After a restart the in-memory overlap memo is gone, so the overlap before
+// the checkpoint is posted again. It must not use up max_alerts_per_sync:
+// otherwise a pass truncated inside the overlap never moves the checkpoint
+// and collection stalls for good.
+func TestCollect_RestartWithAFullOverlapStillAdvances(t *testing.T) {
+	bothProfiles(t, func(t *testing.T, profile mockProfile) {
+		env := newEnv(t, profile, nil)
+		for i := int64(1); i <= 5; i++ {
+			env.mock.add(securityIncident(i, testBase.Add(-time.Duration(10-i)*time.Minute)))
+		}
+		ids, b := env.collect(t, "")
+		sameIDs(t, "before the restart", ids, idsOf(1, 2, 3, 4, 5))
+		checkpoint := b.checkpoint
+
+		fresh, err := newCollectorWith(env.coll.settings, env.server.Client(), config.SyncConfig{LookbackDays: 7, MaxAlertsPerSync: 3, StatusRefreshHours: 6})
+		if err != nil {
+			t.Fatal(err)
+		}
+		env.coll = fresh
+		env.useClock()
+		env.clock.Advance(time.Minute)
+		for i := int64(100); i <= 103; i++ {
+			env.mock.add(securityIncident(i, testBase.Add(time.Duration(i-99)*time.Second)))
+		}
+
+		var got []string
+		for cycle := 0; cycle < 4; cycle++ {
+			ids, b := env.collect(t, checkpoint)
+			for _, id := range ids {
+				if len(id) == 3 { // 100..103
+					got = append(got, id)
+				}
+			}
+			checkpoint = b.checkpoint
+			env.clock.Advance(time.Minute)
+		}
+		sameIDs(t, "new incidents after the restart", got, idsOf(100, 101, 102, 103))
+	})
+}
+
+// The status sweep reads the whole lookback window; the incidents it could
+// insert stay within max_alerts_per_sync (the rest only refresh the status).
+func TestCollect_StatusSweepRespectsMaxAlerts(t *testing.T) {
+	env := newEnv(t, profileCloud, func(_ *settings, s *config.SyncConfig) { s.MaxAlertsPerSync = 2 })
+	for i := int64(1); i <= 10; i++ {
+		env.mock.add(securityIncident(i, testBase.Add(-time.Duration(11-i)*time.Hour)))
+	}
+	ids, b := env.collect(t, "")
+	sameIDs(t, "cycle 1", ids, idsOf(1, 2))
+
+	env.clock.Advance(6 * time.Hour)
+	ids, b = env.collect(t, b.checkpoint)
+	insertable := 0
+	for _, id := range ids {
+		if !b.statusOnly[id] && !b.fairExcluded[id] {
+			insertable++
+		}
+	}
+	if insertable > 2 {
+		t.Errorf("sweep cycle: %d insertable alerts of %d, max_alerts_per_sync is 2 (statusOnly %v)", insertable, len(ids), b.statusOnly)
+	}
+	sameIDs(t, "sweep cycle", ids, idsOf(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+	if b.statusOnly["3"] || b.statusOnly["4"] || !b.statusOnly["5"] || !b.statusOnly["1"] {
+		t.Errorf("statusOnly = %v, want the incremental 3 and 4 insertable and the sweep only status", b.statusOnly)
+	}
+}

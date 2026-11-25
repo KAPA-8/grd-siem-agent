@@ -14,7 +14,8 @@
 // the lookback horizon is sent as statusOnly (the platform only refreshes the
 // status of an alert it already has). Every status_refresh_hours the whole
 // lookback window is read again, since an analyst can resolve an incident
-// (false positive...) without its incidentLastSeen changing.
+// (false positive...) without its incidentLastSeen changing; the incidents
+// that sweep could insert stay within max_alerts_per_sync.
 package fortisiem
 
 import (
@@ -31,6 +32,7 @@ import (
 
 	"github.com/grd-platform/grd-siem-agent/internal/collector"
 	"github.com/grd-platform/grd-siem-agent/internal/config"
+	"github.com/grd-platform/grd-siem-agent/internal/models"
 	"github.com/grd-platform/grd-siem-agent/internal/siemhttp"
 )
 
@@ -452,13 +454,27 @@ type pass struct {
 	observe func(lastSeen int64, id string)
 	// emitted, when set, receives the incidents added to the batch.
 	emitted func(id string, lastSeen int64, hasLastSeen bool)
+	// uncounted, when set, reports an incident that does not count toward
+	// limit (see Collect: the overlap before the checkpoint).
+	uncounted func(lastSeen int64, hasLastSeen bool) bool
+	// insertQuota, when >= 0, is how many incidents the platform could insert
+	// (neither statusOnly nor fairExcluded) the pass may add; the incidents
+	// past it are sent as statusOnly.
+	insertQuota int
 }
 
 type passResult struct {
-	accepted  int
+	accepted int
+	// counted is the accepted incidents that count toward the limit.
+	counted   int
 	skipped   int
 	truncated bool
 	unsorted  bool
+}
+
+// insertable reports a template the platform inserts when it is new.
+func insertable(t models.AlertImportTemplate) bool {
+	return !t.StatusOnly && (t.FairExcluded == nil || !*t.FairExcluded)
 }
 
 // Collect fetches the incidents seen since the checkpoint.
@@ -467,9 +483,23 @@ type passResult struct {
 // lookback window without a checkpoint) and is the batch window. Incidents
 // already delivered with the same incidentLastSeen (the checkpoint's IDs, and
 // the overlap delivered by the previous batch) are skipped. Incidents first
-// seen before now - lookback_days are sent as statusOnly. When a status sweep
-// is due, [now - lookback_days, now] is read again and every incident not
-// already in the batch is added.
+// seen before now - lookback_days are sent as statusOnly.
+//
+// max_alerts_per_sync bounds the incidents read past the checkpoint: the
+// overlap before it (incidentLastSeen < checkpoint ts) was delivered before
+// and does not count. After a restart the overlap memo is empty and the
+// overlap is posted again (the platform counts it as duplicates); if it
+// counted, an overlap of max_alerts_per_sync incidents would truncate every
+// pass before the checkpoint and collection would stall.
+//
+// When a status sweep is due, [now - lookback_days, now] is read again and
+// every incident not already in the batch is added. Like direct mode, the
+// sweep keeps the statusOnly rule of the incremental pass (first seen before
+// the lookback horizon), so an incident reclassified from false positive to
+// true positive without a new event is still imported; but the incidents it
+// could insert stay within what max_alerts_per_sync leaves after the
+// incremental pass, and the rest go as statusOnly (only their status is
+// refreshed; the next sweep sees them again).
 func (c *Collector) Collect(ctx context.Context, checkpoint string) (collector.Batch, error) {
 	now := c.now()
 	nowMs := now.UnixMilli()
@@ -532,6 +562,10 @@ func (c *Collector) Collect(ctx context.Context, checkpoint string) (collector.B
 				delivered[id] = lastSeen
 			}
 		},
+		uncounted: func(lastSeen int64, hasLastSeen bool) bool {
+			return valid && hasLastSeen && lastSeen < cp.TS
+		},
+		insertQuota: -1,
 	}
 	res, err := c.runPass(ctx, &batch, incremental)
 	if err != nil {
@@ -554,7 +588,13 @@ func (c *Collector) Collect(ctx context.Context, checkpoint string) (collector.B
 			// The first cycle reads the whole lookback window already.
 			tracker.setSweep(nowMs)
 		case nowMs-cp.Sweep >= c.statusRefresh.Milliseconds():
-			sweep := pass{name: "status sweep", from: min(horizon, to), to: to, limit: hardLimit, opts: opts, exclude: inBatch}
+			quota := c.maxAlerts
+			for _, t := range batch.Templates {
+				if insertable(t) {
+					quota--
+				}
+			}
+			sweep := pass{name: "status sweep", from: min(horizon, to), to: to, limit: hardLimit, opts: opts, exclude: inBatch, insertQuota: max(quota, 0)}
 			sres, err := c.runPass(ctx, &batch, sweep)
 			if err != nil {
 				return collector.Batch{}, fmt.Errorf("barrido de estado: %w", err)
@@ -629,6 +669,7 @@ func (c *Collector) mapOptions(window *Window) MapOptions {
 func (c *Collector) runPass(ctx context.Context, batch *collector.Batch, p pass) (passResult, error) {
 	var res passResult
 	limit := p.limit
+	quota := p.insertQuota
 	seen := map[string]struct{}{}
 	prev := int64(-1)
 
@@ -674,7 +715,7 @@ func (c *Collector) runPass(ctx context.Context, batch *collector.Batch, p pass)
 				}
 				prev = max(prev, lastSeen)
 			}
-			if res.accepted >= limit {
+			if res.counted >= limit {
 				res.truncated = true
 				return res, nil
 			}
@@ -698,6 +739,16 @@ func (c *Collector) runPass(ctx context.Context, batch *collector.Batch, p pass)
 				continue
 			}
 			res.accepted++
+			if p.uncounted == nil || !p.uncounted(lastSeen, hasLastSeen) {
+				res.counted++
+			}
+			if p.insertQuota >= 0 && insertable(template) {
+				if quota > 0 {
+					quota--
+				} else {
+					template.StatusOnly = true
+				}
+			}
 			batch.Templates = append(batch.Templates, template)
 			if p.emitted != nil {
 				p.emitted(id, lastSeen, hasLastSeen)
